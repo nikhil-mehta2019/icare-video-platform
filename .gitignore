@@ -205,3 +205,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+/mux-signing-key-hmF1x2Ev02j4zJO01vI9SQRe00JmknKlwySlY5QGWAQN9U.pem
+/.env
