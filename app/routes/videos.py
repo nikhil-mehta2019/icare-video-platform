@@ -1,34 +1,31 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
-
-from app.services.vimeo_import_service import import_vimeo_video
-from app.services.vimeo_service import get_video_download_url
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
+from app.schemas.request_models import VimeoImportRequest
+from app.services.migration_service import process_single_video
+from app.database.session import SessionLocal
 
 router = APIRouter(prefix="/videos", tags=["Videos"])
 
-
-class VimeoImportRequest(BaseModel):
-    title: str
-    vimeo_url: str
-    course_id: int
-    order: int
-
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 @router.post("/import-vimeo")
-def import_video(data: VimeoImportRequest):
-
-    # extract vimeo id
-    vimeo_id = data.vimeo_url.split("/")[-1]
-    
-    # get download url from vimeo
-    video_url = get_video_download_url(vimeo_id)
-
-    result = import_vimeo_video(
-        data.title,
-        video_url,
-        data.course_id,
-        data.order,
-        vimeo_id
-    )
-
-    return result
+def import_video(data: VimeoImportRequest, db: Session = Depends(get_db)):
+    try:
+        # Automatically extract Vimeo ID, stripping trailing slashes and query parameters
+        vimeo_id = data.vimeo_url.rstrip("/").split("/")[-1].split("?")[0]
+        
+        result = process_single_video(
+            db=db,
+            title=data.title,
+            vimeo_url=data.vimeo_url,
+            vimeo_id=vimeo_id,
+            folder_path="Manual Import"
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

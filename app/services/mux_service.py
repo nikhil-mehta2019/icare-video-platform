@@ -1,11 +1,9 @@
-
 import requests
 from app.config import MUX_TOKEN_ID, MUX_TOKEN_SECRET
 
 BASE_URL = "https://api.mux.com/video/v1"
 
 def upload_video(video_url):
-
     payload = {
         "input": video_url,
         "playback_policy": ["public"]
@@ -16,7 +14,8 @@ def upload_video(video_url):
         json=payload,
         auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
     )
-
+    
+    response.raise_for_status()
     data = response.json()["data"]
 
     return {
@@ -25,12 +24,10 @@ def upload_video(video_url):
     }
 
 def get_asset(asset_id: str):
-
     response = requests.get(
         f"{BASE_URL}/assets/{asset_id}",
         auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
     )
 
     response.raise_for_status()
-
     return response.json()["data"]
