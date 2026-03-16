@@ -2,18 +2,32 @@ import requests
 from app.config import VIMEO_ACCESS_TOKEN
 
 def get_vimeo_videos():
+    """Fetches all videos from Vimeo account using pagination."""
+    videos = []
     url = "https://api.vimeo.com/me/videos"
     headers = {
         "Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"
     }
 
-    response = requests.get(url, headers=headers)
+    while url:
+        response = requests.get(url, headers=headers)
 
-    if response.status_code != 200:
-        raise Exception(f"Vimeo API error: {response.text}")
+        if response.status_code != 200:
+            raise Exception(f"Vimeo API error: {response.text}")
 
-    data = response.json()
-    return data.get("data", [])
+        data = response.json()
+        videos.extend(data.get("data", []))
+        
+        # Check for the next page in pagination
+        paging = data.get("paging", {})
+        next_page = paging.get("next")
+        
+        if next_page:
+            url = f"https://api.vimeo.com{next_page}"
+        else:
+            url = None
+
+    return videos
 
 def get_video_download_url(vimeo_id):
     url = f"https://api.vimeo.com/videos/{vimeo_id}"
@@ -43,12 +57,9 @@ def extract_folder_path(video_data):
     
     folders = video_data.get("folders", {}).get("data", [])
     if folders:
-        # Build path from nested folders
         folder_names = [f.get("name") for f in folders]
-        # Reverse to get top-level to bottom-level hierarchy
         folder_path = " / ".join(reversed(folder_names))
     elif video_data.get("parent_folder"):
-        # Fallback for older Vimeo API structures
         parent = video_data.get("parent_folder")
         if isinstance(parent, dict):
             folder_path = parent.get("name", "Root")

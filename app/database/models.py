@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
 from datetime import datetime
 from app.database.session import Base
 
@@ -15,6 +15,8 @@ class Video(Base):
     mux_playback_id = Column(String, nullable=True)
     mux_stream_url = Column(String, nullable=True)
     
+    status = Column(String, default="pending") # "pending", "ready", "errored"
+    
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class MigrationJob(Base):
@@ -25,4 +27,13 @@ class MigrationJob(Base):
     imported_videos = Column(Integer, default=0)
     failed_videos = Column(Integer, default=0)
     status = Column(String, default="running")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class MigrationError(Base):
+    __tablename__ = "migration_errors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("migration_jobs.id"), nullable=False)
+    vimeo_id = Column(String, nullable=False)
+    error_message = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)

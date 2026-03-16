@@ -9,7 +9,7 @@ class VideoResponse(BaseModel):
     mux_stream_url: Optional[str]
     
     class Config:
-        orm_mode = True
+        from_attributes = True  # Changed from orm_mode = True for Pydantic V2
 
 class MigrationResponse(BaseModel):
     status: str
