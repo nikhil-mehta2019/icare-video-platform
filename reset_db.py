@@ -1,16 +1,10 @@
-import os
+from app.database.session import engine
+from app.database.models import Base
 
-from app.database.db import Base, engine
-from app.database import models  # IMPORTANT: this loads the models
+print("Dropping all tables...")
+Base.metadata.drop_all(bind=engine)
 
-DB_FILE = "icare.db"
-
-# Delete old database
-if os.path.exists(DB_FILE):
-    os.remove(DB_FILE)
-    print("Old database deleted")
-
-# Create tables
+print("Creating tables...")
 Base.metadata.create_all(bind=engine)
 
-print("Tables created successfully")
+print("Database reset complete.")

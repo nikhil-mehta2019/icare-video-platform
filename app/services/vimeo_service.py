@@ -1,27 +1,34 @@
 import requests
+import logging
 from app.config import VIMEO_ACCESS_TOKEN
 
-def get_vimeo_videos():
-    """Fetches all videos from Vimeo account using pagination."""
+logger = logging.getLogger(__name__)
+
+def get_vimeo_videos(limit=None):
     videos = []
-    url = "https://api.vimeo.com/me/videos"
+    url = "https://api.vimeo.com/me/videos?per_page=50"
+
     headers = {
         "Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"
     }
 
     while url:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=(5,60))
 
         if response.status_code != 200:
             raise Exception(f"Vimeo API error: {response.text}")
 
         data = response.json()
-        videos.extend(data.get("data", []))
-        
-        # Check for the next page in pagination
-        paging = data.get("paging", {})
-        next_page = paging.get("next")
-        
+        page_videos = data.get("data", [])
+
+        videos.extend(page_videos)
+
+        # STOP early if limit reached
+        if limit and len(videos) >= limit:
+            return videos[:limit]
+
+        next_page = data.get("paging", {}).get("next")
+
         if next_page:
             url = f"https://api.vimeo.com{next_page}"
         else:
@@ -35,7 +42,7 @@ def get_video_download_url(vimeo_id):
         "Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"
     }
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=(5,60))
 
     if response.status_code != 200:
         raise Exception(f"Vimeo API error: {response.text}")

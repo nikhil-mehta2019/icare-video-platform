@@ -1,10 +1,12 @@
 import logging
-import time
+import asyncio
 from app.database.session import SessionLocal
 from app.database.models import MigrationJob, Video, MigrationError
 from app.services.vimeo_service import get_vimeo_videos, get_video_download_url, extract_folder_path
 from app.services.mux_service import upload_video
 
+# Force logging to display in standard output
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:\t  %(message)s")
 logger = logging.getLogger(__name__)
 
 def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
@@ -12,7 +14,6 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
     existing = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
     
     if existing:
-        logger.info(f"Skipping duplicate video: {vimeo_id}")
         return {"status": "skipped", "message": "Video already imported", "vimeo_id": vimeo_id}
 
     try:
@@ -36,50 +37,58 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
         
         return {"status": "success", "mux_asset_id": mux_data["asset_id"], "vimeo_id": vimeo_id}
     except Exception as e:
-        logger.error(f"Failed to process video {vimeo_id}: {str(e)}")
         db.rollback()
         raise e
 
-def run_bulk_migration(job_id: int, limit: int = None):
-    """Background task for migrating the entire Vimeo account robustly."""
+async def run_bulk_migration(job_id: int, limit: int = None):
+    """Async background task for migrating the entire Vimeo account robustly."""
+    logger.info(f"Starting migration for Job ID: {job_id}")
     db = SessionLocal()
     job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
     
     try:
-        videos = get_vimeo_videos()
+        logger.info("Fetching Vimeo videos...")
+        # Run blocking network call in a separate thread so it doesn't freeze FastAPI
+        videos = await asyncio.to_thread(get_vimeo_videos,limit)
         
-        # Apply the limit for trial runs
         if limit and limit > 0:
             videos = videos[:limit]
             
-        job.total_videos = len(videos)
+        total = len(videos)
+        job.total_videos = total
         db.commit()
+        
+        logger.info(f"Total videos discovered: {total}")
 
-        for v in videos:
-            # --- NEW: Check for Cancellation Signal ---
+        for index, v in enumerate(videos, start=1):
             db.refresh(job)
             if job.status == "cancelled":
                 logger.info(f"Migration Job {job.id} was stopped by the user.")
-                break # Instantly exit the loop and stop processing
-            # ------------------------------------------
+                break 
 
             vimeo_id = v["uri"].split("/")[-1]
             folder_path = extract_folder_path(v)
             vimeo_url = v.get("link", f"https://vimeo.com/{vimeo_id}")
             title = v.get("name", "Untitled")
             
+            logger.info(f"Uploading video {index} / {total} (Vimeo ID: {vimeo_id})")
+            
             try:
-                result = process_single_video(
-                    db=db,
-                    title=title,
-                    vimeo_url=vimeo_url,
-                    vimeo_id=vimeo_id,
-                    folder_path=folder_path
+                # Wrap the synchronous video processing in a thread
+                result = await asyncio.to_thread(
+                    process_single_video, db, title, vimeo_url, vimeo_id, folder_path
                 )
+                
                 if result["status"] == "success":
                     job.imported_videos += 1
+                    logger.info(f"Mux asset creation result: SUCCESS (Asset ID: {result.get('mux_asset_id')})")
+                elif result["status"] == "skipped":
+                    # Count skipped as imported so percent_complete reaches 100%
+                    job.imported_videos += 1 
+                    logger.info(f"Mux asset creation result: SKIPPED (Already exists in database)")
+                    
             except Exception as e:
-                logger.error(f"Error caught in bulk loop for {vimeo_id}: {str(e)}")
+                logger.error(f"Mux asset creation result: FAILED (Reason: {str(e)})")
                 job.failed_videos += 1
                 
                 error_log = MigrationError(
@@ -89,12 +98,18 @@ def run_bulk_migration(job_id: int, limit: int = None):
                 )
                 db.add(error_log)
             
+            # Commit the progress fields to the DB immediately
             db.commit()
-            time.sleep(1) # Rate limit protection
+            
+            percent_complete = round((job.imported_videos + job.failed_videos) / total * 100, 1) if total > 0 else 0
+            logger.info(f"Migration Progress: {percent_complete}%")
+            
+            # Non-blocking pause for rate limit protection
+            await asyncio.sleep(1) 
 
-        # Only mark as completed if it wasn't cancelled
         if job.status != "cancelled":
             job.status = "completed"
+            logger.info(f"Migration completed successfully for Job ID: {job_id}")
             db.commit()
 
     except Exception as e:

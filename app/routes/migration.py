@@ -1,4 +1,5 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
@@ -18,8 +19,7 @@ def get_db():
         db.close()
 
 @router.post("/vimeo-account", response_model=MigrationResponse)
-def start_migration(
-    background_tasks: BackgroundTasks, 
+async def start_migration(
     request: BulkMigrationRequest = BulkMigrationRequest(), # Defaults to no limit
     db: Session = Depends(get_db)
 ):
@@ -36,7 +36,8 @@ def start_migration(
     db.commit()
     db.refresh(job)
 
-    background_tasks.add_task(run_bulk_migration, job.id, request.limit)
+    # Replaced BackgroundTasks with standard asyncio.create_task for reliable async execution
+    asyncio.create_task(run_bulk_migration(job.id, request.limit))
     
     return {"status": "Migration started", "job_id": job.id}
 
