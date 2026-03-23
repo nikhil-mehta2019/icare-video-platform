@@ -12,12 +12,17 @@ def generate_migration_excel() -> BytesIO:
         data = []
         for v in videos:
             data.append({
+                "Vimeo ID": v.vimeo_id,
                 "Vimeo Title": v.vimeo_title,
                 "Vimeo Folder Path": v.vimeo_folder_path or "Root",
                 "Vimeo URL": v.vimeo_url,
-                "Mux Title": v.vimeo_title,
                 "Mux Asset ID": v.mux_asset_id,
-                "Mux Playback URL": v.mux_stream_url
+                "Mux Playback ID": v.mux_playback_id,
+                "Mux Stream URL": v.mux_stream_url,
+                "Captions Count": v.captions_count,
+                "Captions Languages": v.captions_languages or "None",
+                "Audio Tracks Count": v.audio_tracks_count,
+                "Audio Languages": v.audio_languages or "None"
             })
 
         df = pd.DataFrame(data)

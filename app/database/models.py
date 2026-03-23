@@ -15,8 +15,14 @@ class Video(Base):
     mux_playback_id = Column(String, nullable=True)
     mux_stream_url = Column(String, nullable=True)
     
-    status = Column(String, default="pending") # "pending", "ready", "errored"
+    # --- NEW: Track Verification Fields ---
+    captions_count = Column(Integer, default=0)
+    captions_languages = Column(String, nullable=True)
+    audio_tracks_count = Column(Integer, default=0)
+    audio_languages = Column(String, nullable=True)
+    # --------------------------------------
     
+    status = Column(String, default="pending") # "pending", "ready", "errored"
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class MigrationJob(Base):

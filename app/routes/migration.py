@@ -8,6 +8,7 @@ from app.services.migration_service import run_bulk_migration
 from app.services.report_service import generate_migration_excel
 from app.schemas.response_models import MigrationResponse
 from app.schemas.request_models import BulkMigrationRequest
+from app.services.mux_service import get_all_assets, delete_asset
 
 router = APIRouter(prefix="/migration", tags=["Migration"])
 
@@ -87,3 +88,40 @@ def cancel_migration(job_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"status": "success", "message": f"Migration job {job_id} has been cancelled."}
+
+@router.delete("/cleanup-mux")
+async def cleanup_all_mux_assets():
+    """DANGER: Deletes ALL assets from the connected Mux account one by one."""
+    try:
+        # 1. Fetch all assets from Mux
+        assets = await asyncio.to_thread(get_all_assets)
+        total_assets = len(assets)
+        
+        if total_assets == 0:
+            return {"status": "success", "message": "No assets found in Mux to delete."}
+
+        deleted_count = 0
+        failed_count = 0
+
+        # 2. Loop through and delete them one by one
+        for index, asset in enumerate(assets, start=1):
+            asset_id = asset["id"]
+            try:
+                await asyncio.to_thread(delete_asset, asset_id)
+                deleted_count += 1
+            except Exception as e:
+                failed_count += 1
+            
+            # Pause for 200ms to respect Mux API rate limits
+            await asyncio.sleep(0.2)
+
+        return {
+            "status": "success",
+            "message": f"Mux cleanup complete.",
+            "total_found": total_assets,
+            "deleted": deleted_count,
+            "failed": failed_count
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
