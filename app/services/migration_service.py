@@ -79,7 +79,11 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
         db.commit()
         
         logger.info(f"[Migration Worker] ✅ Successfully processed Vimeo ID: {vimeo_id}")
-        return {"status": "success"}
+        return {
+            "status": "success",
+            "mux_asset_id": mux_asset_id,
+            "mux_playback_id": mux_data["playback_id"]
+        }
         
     except Exception as e:
         logger.error(f"[Migration Worker] ❌ Exception occurred while processing {vimeo_id}: {str(e)}")

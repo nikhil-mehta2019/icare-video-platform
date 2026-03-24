@@ -4,7 +4,7 @@ import json
 import base64
 import jwt
 import time
-from app.config import MUX_TOKEN_ID, MUX_TOKEN_SECRET,MUX_PRIVATE_KEY
+from app.config import MUX_TOKEN_ID, MUX_TOKEN_SECRET, MUX_PRIVATE_KEY, MUX_SIGNING_KEY_ID
 
 BASE_URL = "https://api.mux.com/video/v1"
 logger = logging.getLogger(__name__)

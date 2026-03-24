@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import playback, videos, migration, webhook
+from app.routes import playback, videos, migration, webhook, batch
 from app.database.session import Base, engine
 
 app = FastAPI(title="iCare Video Migration Platform")
@@ -10,7 +10,8 @@ Base.metadata.create_all(bind=engine)
 app.include_router(playback.router)
 app.include_router(videos.router)
 app.include_router(migration.router)
-app.include_router(webhook.router)  # Added webhook support
+app.include_router(webhook.router) 
+app.include_router(batch.router)
 
 @app.get("/")
 def home():
