@@ -9,7 +9,9 @@ MUX_TOKEN_SECRET = os.getenv("MUX_TOKEN_SECRET")
 MUX_SIGNING_KEY_ID = os.getenv("MUX_SIGNING_KEY_ID")
 MUX_PRIVATE_KEY = os.getenv("MUX_PRIVATE_KEY")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///icare.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("FATAL: DATABASE_URL environment variable is not set")
 
 JWT_SECRET = os.getenv("JWT_SECRET", "icare-secret")
 VIMEO_ACCESS_TOKEN = os.getenv("VIMEO_ACCESS_TOKEN")

@@ -30,22 +30,23 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None):
             logger.info(f"[Mux Service] Added caption input: {name} ({lang})")
             
     if audio_tracks:
-        logger.info(f"[Mux Service] Processing {len(audio_tracks)} audio tracks...")
-        for aud in audio_tracks:
-            lang = aud.get("language") or "en"
-            name = aud.get("name") or "Alternate Audio"
+        logger.info(f"[Mux Service] Processing {len(audio_tracks)} alternate audio track(s)...")
+        for track in audio_tracks:
+            lang = track.get("language") or "en"
+            name = track.get("name") or lang
             inputs.append({
-                "url": aud["url"],
+                "url": track["url"],
                 "type": "audio",
                 "language_code": lang,
                 "name": name
             })
-            logger.info(f"[Mux Service] Added audio input: {name} ({lang})")
+            logger.info(f"[Mux Service] Added audio track input: {name} ({lang})")
 
     safe_title = title[:250] if title else "Untitled"
     payload = {
         "input": inputs,
         "playback_policy": ["public"],
+        "encoding_tier": "smart",         # Requires paid plan — enables multiple audio tracks
         "meta": {
             "title": safe_title
         }
@@ -123,13 +124,83 @@ def get_all_assets():
         
     return assets
 
+def wait_for_asset_ready(asset_id: str, timeout_seconds: int = 600, poll_interval: int = 10):
+    """Polls Mux every 10s until asset status is 'ready'. Raises on error or timeout."""
+    elapsed = 0
+    while elapsed < timeout_seconds:
+        asset = get_asset(asset_id)
+        status = asset.get("status")
+        logger.info(f"[Mux Service] Asset {asset_id} status: {status} ({elapsed}s elapsed)")
+        if status == "ready":
+            return asset
+        if status == "errored":
+            raise Exception(f"Mux asset {asset_id} errored during processing.")
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    raise Exception(f"Mux asset {asset_id} did not become ready within {timeout_seconds}s.")
+
+def add_audio_track(asset_id: str, url: str, language: str, name: str):
+    """Attaches a single alternate audio track to an existing ready Mux asset."""
+    logger.info(f"[Mux Service] Attaching audio track '{name}' ({language}) to asset {asset_id}")
+    response = requests.post(
+        f"{BASE_URL}/assets/{asset_id}/tracks",
+        json={
+            "url": url,
+            "type": "audio",
+            "language_code": language,
+            "name": name
+        },
+        auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
+    )
+    if not response.ok:
+        raise Exception(f"Mux API Error ({response.status_code}): {response.text}")
+    logger.info(f"[Mux Service] ✅ Audio track '{name}' attached successfully.")
+    return response.json()["data"]
+
+def add_public_playback_id(asset_id: str):
+    """Adds a public playback ID to an existing Mux asset."""
+    response = requests.post(
+        f"{BASE_URL}/assets/{asset_id}/playback-ids",
+        json={"policy": "public"},
+        auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
+    )
+    if not response.ok:
+        raise Exception(f"Mux API Error ({response.status_code}): {response.text}")
+    return response.json()["data"]["id"]
+
+def add_signed_playback_id(asset_id: str):
+    """Adds a signed playback ID to an existing Mux asset (used for mobile-only downloads)."""
+    response = requests.post(
+        f"{BASE_URL}/assets/{asset_id}/playback-ids",
+        json={"policy": "signed"},
+        auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
+    )
+    if not response.ok:
+        raise Exception(f"Mux API Error ({response.status_code}): {response.text}")
+    return response.json()["data"]["id"]
+
+def generate_download_token(signed_playback_id: str, expiration_hours: int = 1):
+    """
+    Generates a short-lived signed JWT for downloading the static MP4 rendition.
+    aud='d' targets Mux static renditions (the downloadable MP4).
+    Only our backend can issue this — nobody else can access the file.
+    """
+    decoded_private_key = base64.b64decode(MUX_PRIVATE_KEY)
+    expiration_time = int(time.time()) + (expiration_hours * 3600)
+
+    payload = {
+        "sub": signed_playback_id,
+        "aud": "d",           # "d" = static renditions / download (not streaming)
+        "exp": expiration_time,
+        "kid": MUX_SIGNING_KEY_ID
+    }
+
+    token = jwt.encode(payload, decoded_private_key, algorithm="RS256")
+    return token
 
 def generate_playback_token(playback_id: str, expiration_hours: int = 6):
     """Generates a secure, expiring JWT token for Mux playback."""
-    # Decode the base64 private key provided by Mux
     decoded_private_key = base64.b64decode(MUX_PRIVATE_KEY)
-    
-    # Set expiration time
     expiration_time = int(time.time()) + (expiration_hours * 3600)
     
     payload = {
@@ -139,6 +210,5 @@ def generate_playback_token(playback_id: str, expiration_hours: int = 6):
         "kid": MUX_SIGNING_KEY_ID
     }
     
-    # Sign it using RS256 encryption
     token = jwt.encode(payload, decoded_private_key, algorithm="RS256")
     return token

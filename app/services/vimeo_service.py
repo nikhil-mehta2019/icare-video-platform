@@ -111,38 +111,94 @@ def get_video_captions(vimeo_id):
         return []
 
 def get_video_audio_tracks(vimeo_id):
-    """Fetches alternate audio tracks from a Vimeo video (if available)."""
-    url = f"https://api.vimeo.com/videos/{vimeo_id}/audio" 
-    headers = {
-        "Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"
-    }
+    """Fetches alternate (dubbed) audio tracks by parsing Vimeo's HLS manifest."""
+    import re
+    from urllib.parse import urljoin
+
+    headers = {"Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"}
 
     try:
-        response = requests.get(url, headers=headers, timeout=(5, 60))
-        if response.status_code != 200:
+        # Step 1: Get the HLS manifest URL from the files list
+        r = requests.get(
+            f"https://api.vimeo.com/videos/{vimeo_id}?fields=files",
+            headers=headers, timeout=(5, 60)
+        )
+        if r.status_code != 200:
             return []
-            
-        data = response.json()
-        tracks = data.get("data", [])
-        
+
+        files = r.json().get("files", [])
+        hls_file = next((f for f in files if f.get("rendition") == "adaptive"), None)
+        if not hls_file or not hls_file.get("link"):
+            return []
+
+        # Step 2: Fetch manifest, following redirects to get the final base URL
+        manifest_r = requests.get(hls_file["link"], allow_redirects=True, timeout=(5, 60))
+        if manifest_r.status_code != 200:
+            return []
+
+        base_url = manifest_r.url
+        manifest = manifest_r.text
+
+        # Step 3: Parse EXT-X-MEDIA:TYPE=AUDIO lines, skip DEFAULT (already in video file)
         audio_tracks = []
-        for track in tracks:
-            if track.get("link"):
-                audio_tracks.append({
-                    "url": track["link"],
-                    "language": track.get("language"),
-                    "name": track.get("name")         
-                })
+        for line in manifest.splitlines():
+            if not line.startswith("#EXT-X-MEDIA:TYPE=AUDIO"):
+                continue
+            if "DEFAULT=YES" in line:
+                continue  # Original audio is already embedded in the video stream
+
+            name = re.search(r'NAME="([^"]*)"', line)
+            language = re.search(r'LANGUAGE="([^"]*)"', line)
+            uri = re.search(r'URI="([^"]*)"', line)
+
+            if not uri:
+                continue
+
+            absolute_uri = urljoin(base_url, uri.group(1))
+            audio_tracks.append({
+                "url": absolute_uri,
+                "language": language.group(1) if language else "en",
+                "name": name.group(1) if name else "Audio"
+            })
+
+        logger.info(f"[Vimeo Service] Found {len(audio_tracks)} alternate audio track(s) for {vimeo_id}")
         return audio_tracks
+
     except Exception as e:
         logger.warning(f"[Vimeo Service] Error fetching audio tracks for {vimeo_id}: {str(e)}")
         return []
 
-def get_vimeo_page(url=None):
+# def get_vimeo_page(url=None):
+#     """Fetches exactly one page of videos from Vimeo and returns the next page URL."""
+#     if not url:
+#         # Default start URL (50 videos per page)
+#         url = "https://api.vimeo.com/me/videos?per_page=50"
+
+#     headers = {
+#         "Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"
+#     }
+
+#     logger.info(f"[Vimeo Service] Requesting Vimeo API: {url.split('.com')[-1]}")
+#     response = requests.get(url, headers=headers, timeout=(5,60))
+
+#     if response.status_code != 200:
+#         logger.error(f"[Vimeo Service] ❌ Vimeo API error: {response.text}")
+#         raise Exception(f"Vimeo API error: {response.text}")
+
+#     data = response.json()
+#     page_videos = data.get("data", [])
+
+#     # Get the URL for the next page (if it exists)
+#     next_page = data.get("paging", {}).get("next")
+#     next_url = f"https://api.vimeo.com{next_page}" if next_page else None
+
+#     return page_videos, next_url
+
+def get_vimeo_page(url=None, custom_start_url=None):
     """Fetches exactly one page of videos from Vimeo and returns the next page URL."""
     if not url:
-        # Default start URL (50 videos per page)
-        url = "https://api.vimeo.com/me/videos?per_page=50"
+        # Use custom start URL if provided, otherwise default to the whole library
+        url = custom_start_url if custom_start_url else "https://api.vimeo.com/me/videos?per_page=50"
 
     headers = {
         "Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"
@@ -163,3 +219,15 @@ def get_vimeo_page(url=None):
     next_url = f"https://api.vimeo.com{next_page}" if next_page else None
 
     return page_videos, next_url
+
+def get_vimeo_folder_videos(folder_id: str):
+    """Specifically fetches videos from a Vimeo project/folder ID."""
+    url = f"https://api.vimeo.com/me/projects/{folder_id}/videos?per_page=100"
+    headers = {"Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"}
+    response = requests.get(url, headers=headers, timeout=(5, 60))
+
+    if response.status_code != 200:
+        logger.error(f"Vimeo API Error: {response.text}")
+        raise Exception(f"Failed to fetch folder: {response.status_code}")
+
+    return response.json().get("data", [])

@@ -8,7 +8,10 @@ from app.services.migration_service import run_bulk_migration
 from app.services.report_service import generate_migration_excel
 from app.schemas.response_models import MigrationResponse
 from app.schemas.request_models import BulkMigrationRequest
-from app.services.mux_service import get_all_assets, delete_asset
+from app.services.mux_service import get_all_assets, delete_asset, add_public_playback_id, add_signed_playback_id
+from app.services.migration_service import process_single_video
+from typing import Optional
+from app.services.migration_service import run_folder_migration
 
 router = APIRouter(prefix="/migration", tags=["Migration"])
 
@@ -91,6 +94,29 @@ def cancel_migration(job_id: int, db: Session = Depends(get_db)):
     
     return {"status": "success", "message": f"Migration job {job_id} has been cancelled."}
 
+@router.post("/make-public")
+async def make_all_assets_public(db: Session = Depends(get_db)):
+    """Adds a public playback ID to all existing signed Mux assets and updates the DB."""
+    from app.database.models import Video
+    videos = db.query(Video).filter(Video.mux_asset_id != None, Video.mux_playback_id != None).all()
+
+    updated, failed = 0, 0
+    results = []
+
+    for video in videos:
+        try:
+            new_playback_id = await asyncio.to_thread(add_public_playback_id, video.mux_asset_id)
+            video.mux_playback_id = new_playback_id
+            video.mux_stream_url = f"https://stream.mux.com/{new_playback_id}.m3u8"
+            db.commit()
+            updated += 1
+            results.append({"vimeo_id": video.vimeo_id, "status": "updated", "public_playback_id": new_playback_id})
+        except Exception as e:
+            failed += 1
+            results.append({"vimeo_id": video.vimeo_id, "status": "failed", "error": str(e)})
+
+    return {"updated": updated, "failed": failed, "results": results}
+
 @router.delete("/cleanup-mux")
 async def cleanup_all_mux_assets():
     """DANGER: Deletes ALL assets from the connected Mux account one by one."""
@@ -127,3 +153,96 @@ async def cleanup_all_mux_assets():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/add-signed-playback")
+async def backfill_signed_playback_ids(db: Session = Depends(get_db)):
+    """
+    One-time backfill: adds a signed playback ID to every video that doesn't have one yet.
+    Run this once for videos migrated before the download feature was added.
+    """
+    from app.database.models import Video
+    videos = db.query(Video).filter(
+        Video.mux_asset_id != None,
+        Video.mux_signed_playback_id == None
+    ).all()
+
+    updated, failed = 0, 0
+    results = []
+
+    for video in videos:
+        try:
+            signed_id = await asyncio.to_thread(add_signed_playback_id, video.mux_asset_id)
+            video.mux_signed_playback_id = signed_id
+            db.commit()
+            updated += 1
+            results.append({"vimeo_id": video.vimeo_id, "status": "updated", "signed_playback_id": signed_id})
+        except Exception as e:
+            failed += 1
+            results.append({"vimeo_id": video.vimeo_id, "status": "failed", "error": str(e)})
+
+    return {"updated": updated, "failed": failed, "results": results}
+
+
+@router.post("/remigrate/{vimeo_id}")
+async def remigrate_single_video(vimeo_id: str, db: Session = Depends(get_db)):
+    """
+    Re-migrates a single video: deletes the old Mux asset, clears the DB record,
+    and re-processes from Vimeo. Use this for videos migrated without audio tracks.
+    """
+    from app.database.models import Video
+
+    video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found in database.")
+
+    # Delete old Mux asset if it exists
+    if video.mux_asset_id:
+        try:
+            await asyncio.to_thread(delete_asset, video.mux_asset_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete old Mux asset: {str(e)}")
+
+    # Save what we need before clearing
+    title = video.vimeo_title
+    vimeo_url = video.vimeo_url
+    folder_path = video.vimeo_folder_path
+
+    # Remove old DB record so process_single_video can create a fresh one
+    db.delete(video)
+    db.commit()
+
+    # Re-process: fetches from Vimeo and uploads to Mux with audio tracks enabled
+    try:
+        result = await asyncio.to_thread(
+            process_single_video, db, title, vimeo_url, vimeo_id, folder_path
+        )
+        return {"status": "success", "vimeo_id": vimeo_id, "mux_result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Re-migration failed: {str(e)}")
+
+
+@router.post("/folder-migration")
+async def start_folder_migration(
+    folder_url: str, 
+    limit: Optional[int] = None, 
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db)
+):
+    # Extract folder ID from URL (e.g., .../folder/28548971 -> 28548971)
+    try:
+        folder_id = folder_url.split("/folder/")[-1].split("?")[0]
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Vimeo folder URL")
+
+    # Prevent concurrent migrations
+    if db.query(MigrationJob).filter(MigrationJob.status == "running").first():
+        raise HTTPException(status_code=400, detail="A migration is already in progress.")
+
+    job = MigrationJob(status="running")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(run_folder_migration, job.id, folder_id, limit)
+
+    return {"status": "Folder migration started", "job_id": job.id, "folder_id": folder_id}

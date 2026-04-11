@@ -4,7 +4,7 @@ python-dotenv
 requests
 pandas
 sqlalchemy
-psycopg2-binary
+pyodbc
 python-jose
 openpyxl
 python-multipart

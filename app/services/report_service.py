@@ -18,6 +18,7 @@ def generate_migration_excel() -> BytesIO:
                 "Vimeo URL": v.vimeo_url,
                 "Mux Asset ID": v.mux_asset_id,
                 "Mux Playback ID": v.mux_playback_id,
+                "Mux Player URL": f"https://player.mux.com/{v.mux_playback_id}" if v.mux_playback_id else "",
                 "Mux Stream URL": v.mux_stream_url,
                 "Captions Count": v.captions_count,
                 "Captions Languages": v.captions_languages or "None",

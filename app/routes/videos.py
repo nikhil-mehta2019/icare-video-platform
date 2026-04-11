@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
 from app.database.models import Video, UserCourseAccess, VideoProgress
-from app.services.mux_service import generate_playback_token
+from app.services.mux_service import generate_playback_token, generate_download_token
 from app.services.migration_service import process_single_video
 from pydantic import BaseModel
 from typing import Optional
@@ -37,8 +37,11 @@ def get_current_user(x_user_id: int = Header(..., description="Simulated Auth To
 @router.post("/import-vimeo")
 def import_video(data: VimeoImportRequest, db: Session = Depends(get_db)):
     try:
-        # Automatically extract Vimeo ID, stripping trailing slashes and query parameters
-        vimeo_id = data.vimeo_url.rstrip("/").split("/")[-1].split("?")[0]
+        # Extract Vimeo ID — handles both:
+        # https://vimeo.com/123456789
+        # https://vimeo.com/123456789/privacyhash
+        parts = data.vimeo_url.rstrip("/").split("?")[0].split("/")
+        vimeo_id = next(p for p in reversed(parts) if p.isdigit())
         
         result = process_single_video(
             db=db,
@@ -113,6 +116,51 @@ def get_secure_playback_data(
         "resume_from_seconds": resume_seconds, # NEW
         "is_completed": is_completed           # NEW
     }
+
+@router.get("/{vimeo_id}/download")
+def get_download_url(
+    vimeo_id: str,
+    course_id: int = 1,
+    user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns a short-lived signed MP4 download URL for the mobile app ONLY.
+    The signed playback ID is never exposed publicly — only our backend can issue these tokens.
+    """
+    # 1. Access check (same 90-day gate as streaming)
+    access = db.query(UserCourseAccess).filter(
+        UserCourseAccess.user_id == user_id,
+        UserCourseAccess.course_id == course_id
+    ).first()
+
+    if not access:
+        raise HTTPException(status_code=403, detail="User does not have access to this training program.")
+
+    if datetime.utcnow() > access.access_end:
+        raise HTTPException(status_code=403, detail="Access expired. Your 90-day training window has closed.")
+
+    # 2. Video check
+    video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found.")
+    if not video.mux_signed_playback_id:
+        raise HTTPException(status_code=400, detail="This video does not have a signed playback ID for downloads. Run the backfill endpoint first.")
+
+    # 3. Generate a short-lived signed download token (1 hour)
+    token = generate_download_token(video.mux_signed_playback_id, expiration_hours=1)
+
+    # The signed MP4 URL — only valid with the token, expires in 1 hour
+    download_url = f"https://stream.mux.com/{video.mux_signed_playback_id}/high.mp4?token={token}"
+
+    return {
+        "status": "success",
+        "vimeo_id": video.vimeo_id,
+        "title": video.vimeo_title,
+        "download_url": download_url,
+        "token_expires_in_hours": 1
+    }
+
 
 # --- NEW: Progress Heartbeat API ---
 @router.post("/{vimeo_id}/progress")
