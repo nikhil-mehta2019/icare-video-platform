@@ -24,35 +24,27 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
     try:
         logger.info(f"[Migration Worker] Requesting highest quality download URL for {vimeo_id}...")
         download_url = get_video_download_url(vimeo_id)
-        
+
         logger.info(f"[Migration Worker] Fetching captions from Vimeo for {vimeo_id}...")
         captions = get_video_captions(vimeo_id)
 
-        # --- STEP 1: Upload video + captions only ---
+        cap_count = len(captions) if captions else 0
+        cap_langs = ", ".join([c.get("language") or "en" for c in captions]) if captions else None
+
+        # --- STEP 1: Upload video + captions to Mux ---
         logger.info(f"[Migration Worker] Step 1: Uploading video + captions to Mux...")
         mux_data = upload_video(
             video_url=download_url,
             title=title,
             captions=captions,
-            audio_tracks=[]   # Audio attached separately after asset is ready
+            audio_tracks=[]
         )
 
         mux_asset_id = mux_data["asset_id"]
-        mux_stream_url = f"https://stream.mux.com/{mux_data['playback_id']}.m3u8"
+        mux_playback_id = mux_data["playback_id"]
+        mux_stream_url = f"https://stream.mux.com/{mux_playback_id}.m3u8"
 
-        # --- STEP 2: Wait for ready, then re-fetch fresh audio URLs and attach ---
-        # Audio URLs from Vimeo HLS manifest are signed CDN URLs that expire within minutes.
-        # We re-fetch them after the asset is ready so they are fresh at attachment time.
-        logger.info(f"[Migration Worker] Step 2: Waiting for asset {mux_asset_id} to be ready...")
-        wait_for_asset_ready(mux_asset_id)
-
-        # Vimeo's HLS audio playlists use CDN-protected segments that Mux cannot fetch anonymously.
-        # Dubbed audio migration requires downloading via yt-dlp and hosting on stable storage.
-        fresh_audio_tracks = []
-        logger.info(f"[Migration Worker] Audio track attachment skipped — Vimeo CDN blocks anonymous Mux fetcher.")
-
-        # Create a separate signed playback ID for mobile-only downloads
-        logger.info(f"[Migration Worker] Creating signed playback ID for mobile downloads...")
+        # Create signed playback ID immediately — doesn't require asset to be ready
         try:
             signed_playback_id = add_signed_playback_id(mux_asset_id)
             logger.info(f"[Migration Worker] ✅ Signed playback ID created: {signed_playback_id}")
@@ -60,37 +52,32 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
             logger.warning(f"[Migration Worker] ⚠️ Could not create signed playback ID for {vimeo_id}: {str(e)}")
             signed_playback_id = None
 
-        cap_count = len(captions) if captions else 0
-        cap_langs = ", ".join([c.get("language") or "en" for c in captions]) if captions else None
-        
-        aud_count = len(fresh_audio_tracks) if fresh_audio_tracks else 0
-        aud_langs = ", ".join([a.get("language") or "en" for a in fresh_audio_tracks]) if fresh_audio_tracks else None
-
-        logger.info(f"[Migration Worker] Building Video database model...")
+        # --- STEP 2: Save to DB immediately so webhooks can find and update this record ---
+        # Status is "processing" — webhook will update it to "ready" when Mux finishes encoding.
+        logger.info(f"[Migration Worker] Step 2: Saving record immediately with status='processing'...")
         video = Video(
             vimeo_id=vimeo_id,
             vimeo_title=title,
             vimeo_url=vimeo_url,
             vimeo_folder_path=folder_path,
             mux_asset_id=mux_asset_id,
-            mux_playback_id=mux_data["playback_id"],
+            mux_playback_id=mux_playback_id,
             mux_signed_playback_id=signed_playback_id,
             mux_stream_url=mux_stream_url,
             captions_count=cap_count,
             captions_languages=cap_langs,
-            audio_tracks_count=aud_count,
-            audio_languages=aud_langs,
-            status="pending"
+            audio_tracks_count=0,
+            audio_languages=None,
+            status="processing"
         )
-        
         db.add(video)
         db.commit()
-        
-        logger.info(f"[Migration Worker] ✅ Successfully processed Vimeo ID: {vimeo_id}")
+        logger.info(f"[Migration Worker] ✅ Record saved. Mux webhook will update status when encoding completes.")
+
         return {
             "status": "success",
             "mux_asset_id": mux_asset_id,
-            "mux_playback_id": mux_data["playback_id"]
+            "mux_playback_id": mux_playback_id
         }
         
     except Exception as e:

@@ -1,11 +1,13 @@
+import asyncio
+import logging
 from fastapi import APIRouter, Request, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
 from app.database.models import Video
-import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhook", tags=["Webhooks"])
+
 
 def get_db():
     db = SessionLocal()
@@ -14,71 +16,82 @@ def get_db():
     finally:
         db.close()
 
+
 @router.post("/mux")
 async def mux_webhook(request: Request, db: Session = Depends(get_db)):
-    logger.info("[Webhook] Received incoming webhook from Mux.")
     try:
         payload = await request.json()
     except Exception:
-        logger.error("[Webhook] ❌ Failed to parse incoming JSON payload.")
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     event_type = payload.get("type")
     data = payload.get("data", {})
-    asset_id = data.get("id")
+    asset_id = data.get("id") or payload.get("object", {}).get("id")
 
-    logger.info(f"[Webhook] Event Type: {event_type} | Asset ID: {asset_id}")
+    logger.info(f"[Webhook] {event_type} | Asset: {asset_id}")
 
     if not event_type or not asset_id:
-        logger.warning("[Webhook] ⚠️ Webhook missing event_type or asset_id. Ignoring.")
-        return {"status": "ignored", "message": "Missing type or asset ID"}
+        return {"status": "ignored", "reason": "missing_fields"}
 
-    logger.info(f"[Webhook] Looking up asset ID {asset_id} in database...")
-    video = db.query(Video).filter(Video.mux_asset_id == asset_id).first()
-    
+    # Retry lookup to handle race condition where webhook fires before our DB commit
+    video = None
+    for attempt in range(3):
+        video = db.query(Video).filter(Video.mux_asset_id == asset_id).first()
+        if video:
+            break
+        if attempt < 2:
+            logger.info(f"[Webhook] Asset {asset_id} not found — retry {attempt + 1}/3")
+            await asyncio.sleep(2)
+
     if not video:
-        logger.warning(f"[Webhook] ⚠️ Asset ID {asset_id} not found in database. Ignoring.")
-        return {"status": "ignored", "message": "Asset ID not found in mapping"}
+        logger.warning(f"[Webhook] Asset {asset_id} not found after 3 retries — not our asset.")
+        return {"status": "ignored", "reason": "asset_not_found"}
 
-    logger.info(f"[Webhook] Match found! Updating video record for Vimeo ID: {video.vimeo_id}")
+    # Extract public playback_id from payload
+    playback_ids = data.get("playback_ids", [])
+    playback_id = next((p["id"] for p in playback_ids if p.get("policy") == "public"), None)
+    if not playback_id and playback_ids:
+        playback_id = playback_ids[0].get("id")
 
-    if event_type == "video.asset.ready":
+    if event_type == "video.asset.created":
+        if video.status == "processing":
+            return {"status": "ignored", "reason": "already_processed"}
+        video.status = "processing"
+        if playback_id and not video.mux_playback_id:
+            video.mux_playback_id = playback_id
+            video.mux_stream_url = f"https://stream.mux.com/{playback_id}.m3u8"
+
+    elif event_type == "video.asset.ready":
+        if video.status == "ready":
+            return {"status": "ignored", "reason": "already_processed"}
         video.status = "ready"
-        logger.info(f"[Webhook] Status updated to 'ready' for {video.vimeo_id}.")
-        
-        tracks = data.get("tracks", [])
-        logger.info(f"[Webhook] Inspecting {len(tracks)} raw tracks returned by Mux...")
-        
-        cap_langs = []
-        aud_langs = []
-        
-        for track in tracks:
-            track_type = track.get("type")
-            track_lang = track.get("language_code", "unknown")
-            
-            if track_type == "text" and track.get("text_type") in ["subtitles", "captions"]:
-                cap_langs.append(track_lang)
-                logger.info(f"[Webhook] Verified text track: {track_lang}")
-            elif track_type == "audio":
-                aud_langs.append(track_lang)
-                logger.info(f"[Webhook] Verified audio track: {track_lang}")
-                
+        if playback_id:
+            video.mux_playback_id = playback_id
+            video.mux_stream_url = f"https://stream.mux.com/{playback_id}.m3u8"
+
+        cap_langs, aud_langs = [], []
+        for track in data.get("tracks", []):
+            lang = track.get("language_code", "unknown")
+            if track.get("type") == "text" and track.get("text_type") in ["subtitles", "captions"]:
+                cap_langs.append(lang)
+            elif track.get("type") == "audio":
+                aud_langs.append(lang)
+
         video.captions_count = len(cap_langs)
         video.captions_languages = ", ".join(cap_langs) if cap_langs else None
-        
         video.audio_tracks_count = len(aud_langs)
         video.audio_languages = ", ".join(aud_langs) if aud_langs else None
-        
-        logger.info(f"[Webhook] Committing verified track counts to database...")
-        db.commit()
-        logger.info(f"[Webhook] ✅ Final Verification: Video {video.vimeo_id} saved with {video.captions_count} captions & {video.audio_tracks_count} audio tracks.")
-        
+        logger.info(f"[Webhook] Tracks — captions: {cap_langs or 'none'} | audio: {aud_langs or 'none'}")
+
     elif event_type == "video.asset.errored":
+        if video.status == "errored":
+            return {"status": "ignored", "reason": "already_processed"}
         video.status = "errored"
-        db.commit()
-        logger.error(f"[Webhook] ❌ Mux reported a processing error for Video {video.vimeo_id}.")
+        logger.error(f"[Webhook] Mux processing error for {video.vimeo_id}")
 
     else:
-        logger.info(f"[Webhook] Unhandled event type '{event_type}'. No action taken.")
+        return {"status": "ignored", "reason": "unhandled_event"}
 
-    return {"status": "success"}
+    db.commit()
+    logger.info(f"[Webhook] ✅ {video.vimeo_id} → '{video.status}'")
+    return {"status": "success", "vimeo_id": video.vimeo_id, "new_status": video.status}
