@@ -66,9 +66,9 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
     output_template = os.path.join(TEMP_AUDIO_DIR, f"{vimeo_id}_{language}.%(ext)s")
 
     cmd = YT_DLP_BASE + [
-        "-f", f"bestaudio[language={language}]/bestaudio",
-        "--extract-audio",
-        "--audio-format", "m4a",
+        # Prefer m4a audio, fallback to any audio — no ffmpeg post-processing needed
+        "-f", f"bestaudio[ext=m4a][language={language}]/bestaudio[ext=m4a]/bestaudio[language={language}]/bestaudio",
+        "--no-post-overwrites",
         "-o", output_template,
         vimeo_url,
     ]
