@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import subprocess
 import logging
@@ -23,7 +24,7 @@ def _download_audio(vimeo_id: str, language: str) -> str | None:
     output_template = os.path.join(TEMP_AUDIO_DIR, f"{vimeo_id}_{language}.%(ext)s")
 
     cmd = [
-        "yt-dlp",
+        sys.executable, "-m", "yt_dlp",   # Use current Python env — avoids Windows PATH issues
         "--add-header", f"Authorization: Bearer {VIMEO_ACCESS_TOKEN}",
         "-f", f"bestaudio[language={language}]/bestaudio",
         "--extract-audio",
