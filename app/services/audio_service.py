@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 BASE_DIR       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEMP_AUDIO_DIR = os.path.join(BASE_DIR, "temp_audio")
 CACHE_DIR      = os.path.join(TEMP_AUDIO_DIR, "yt_cache")
-CLEANUP_DELAY_SECONDS = 600
+CLEANUP_DELAY_SECONDS = 60
 
 YT_DLP_BASE = [
     sys.executable, "-m", "yt_dlp",
