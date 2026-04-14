@@ -11,40 +11,44 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEMP_AUDIO_DIR = os.path.join(BASE_DIR, "temp_audio")
-# Mux typically fetches within a few minutes — 10 min is a safe buffer before deleting
+CACHE_DIR      = os.path.join(TEMP_AUDIO_DIR, "yt_cache")   # Writable cache for IIS service account
 CLEANUP_DELAY_SECONDS = 600
 
 
-def _download_audio(vimeo_id: str, language: str) -> str | None:
+def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
     """
     Uses yt-dlp to download a specific language audio track from Vimeo.
+    - Uses full vimeo_url (with privacy hash) so private videos are accessible
+    - Uses --cache-dir in our writable temp folder to avoid IIS permission errors
     Returns the local file path on success, None on failure.
     """
     os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
     output_template = os.path.join(TEMP_AUDIO_DIR, f"{vimeo_id}_{language}.%(ext)s")
 
     cmd = [
-        sys.executable, "-m", "yt_dlp",   # Use current Python env — avoids Windows PATH issues
+        sys.executable, "-m", "yt_dlp",
+        "--cache-dir", CACHE_DIR,                              # Writable path — avoids system32 permission error
         "--add-header", f"Authorization: Bearer {VIMEO_ACCESS_TOKEN}",
         "-f", f"bestaudio[language={language}]/bestaudio",
         "--extract-audio",
         "--audio-format", "m4a",
         "--no-playlist",
         "-o", output_template,
-        f"https://vimeo.com/{vimeo_id}"
+        vimeo_url                                              # Full URL with privacy hash
     ]
 
-    logger.info(f"[Audio Service] Downloading '{language}' audio for Vimeo ID {vimeo_id}...")
+    logger.info(f"[Audio Service] Downloading '{language}' audio from {vimeo_url}...")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            logger.warning(f"[Audio Service] yt-dlp failed for {vimeo_id} ({language}): {result.stderr[-300:]}")
+            logger.warning(f"[Audio Service] yt-dlp failed for {vimeo_id} ({language}):\n{result.stderr[-500:]}")
             return None
     except subprocess.TimeoutExpired:
         logger.error(f"[Audio Service] yt-dlp timed out for {vimeo_id} ({language})")
         return None
 
-    # Find the downloaded file (ext may vary before conversion)
     for ext in ["m4a", "mp3", "aac", "opus", "webm", "ogg"]:
         path = os.path.join(TEMP_AUDIO_DIR, f"{vimeo_id}_{language}.{ext}")
         if os.path.exists(path):
@@ -55,7 +59,7 @@ def _download_audio(vimeo_id: str, language: str) -> str | None:
     return None
 
 
-async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str):
+async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo_url: str):
     """
     Background task triggered by video.asset.ready webhook.
     Downloads each alternate audio track via yt-dlp, serves it temporarily,
@@ -76,13 +80,13 @@ async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str):
         file_path = None
 
         try:
-            # Step 1: Download audio via yt-dlp
-            file_path = await asyncio.to_thread(_download_audio, vimeo_id, language)
+            # Step 1: Download via yt-dlp using full Vimeo URL
+            file_path = await asyncio.to_thread(_download_audio, vimeo_url, vimeo_id, language)
             if not file_path:
                 logger.warning(f"[Audio Service] Skipping '{name}' ({language}) — download failed.")
                 continue
 
-            # Step 2: Build public URL served by our FastAPI static mount
+            # Step 2: Build public URL served by FastAPI static mount
             filename = os.path.basename(file_path)
             public_url = f"{SERVER_BASE_URL}/temp-audio/{filename}"
             logger.info(f"[Audio Service] Serving at: {public_url}")

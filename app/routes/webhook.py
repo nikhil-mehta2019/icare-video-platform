@@ -88,7 +88,8 @@ async def mux_webhook(request: Request, background_tasks: BackgroundTasks, db: S
         background_tasks.add_task(
             attach_audio_tracks_background,
             video.mux_asset_id,
-            video.vimeo_id
+            video.vimeo_id,
+            video.vimeo_url        # Full URL with privacy hash — needed for yt-dlp auth
         )
         logger.info(f"[Webhook] Background audio attachment queued for {video.vimeo_id}.")
 
