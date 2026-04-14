@@ -8,7 +8,8 @@ from app.services.mux_service import add_audio_track
 
 logger = logging.getLogger(__name__)
 
-TEMP_AUDIO_DIR = "/tmp/mux_audio"
+BASE_DIR       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TEMP_AUDIO_DIR = os.path.join(BASE_DIR, "temp_audio")
 # Mux typically fetches within a few minutes — 10 min is a safe buffer before deleting
 CLEANUP_DELAY_SECONDS = 600
 
