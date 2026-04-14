@@ -1,9 +1,10 @@
 import asyncio
 import logging
-from fastapi import APIRouter, Request, Depends, HTTPException
+from fastapi import APIRouter, Request, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
 from app.database.models import Video
+from app.services.audio_service import attach_audio_tracks_background
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhook", tags=["Webhooks"])
@@ -18,7 +19,7 @@ def get_db():
 
 
 @router.post("/mux")
-async def mux_webhook(request: Request, db: Session = Depends(get_db)):
+async def mux_webhook(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     try:
         payload = await request.json()
     except Exception:
@@ -82,6 +83,14 @@ async def mux_webhook(request: Request, db: Session = Depends(get_db)):
         video.audio_tracks_count = len(aud_langs)
         video.audio_languages = ", ".join(aud_langs) if aud_langs else None
         logger.info(f"[Webhook] Tracks — captions: {cap_langs or 'none'} | audio: {aud_langs or 'none'}")
+
+        # Trigger background audio download + attachment via yt-dlp
+        background_tasks.add_task(
+            attach_audio_tracks_background,
+            video.mux_asset_id,
+            video.vimeo_id
+        )
+        logger.info(f"[Webhook] Background audio attachment queued for {video.vimeo_id}.")
 
     elif event_type == "video.asset.errored":
         if video.status == "errored":
