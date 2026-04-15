@@ -93,7 +93,7 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
     return None
 
 
-async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo_url: str):
+async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo_url: str, only_language: str | None = None):
     """
     Background task triggered by video.asset.ready webhook.
 
@@ -114,6 +114,12 @@ async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo
         return
 
     # Step 2-5: Download, serve, attach, cleanup — one track at a time
+    if only_language:
+        audio_tracks = [t for t in audio_tracks if t["language"] == only_language]
+        if not audio_tracks:
+            logger.warning(f"[Audio Service] Language '{only_language}' not found in Vimeo tracks. Nothing to attach.")
+            return
+
     for track in audio_tracks:
         language = track["language"]
         name = track["name"]

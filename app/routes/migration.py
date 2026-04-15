@@ -223,10 +223,10 @@ async def remigrate_single_video(vimeo_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/attach-audio/{vimeo_id}")
-async def attach_audio(vimeo_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def attach_audio(vimeo_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db), language: Optional[str] = None):
     """
     Manually re-triggers audio attachment for an already-migrated video.
-    Use this to retry failed/missing audio tracks without re-uploading the video.
+    Use ?language=es to attach only a specific language and avoid duplicates.
     """
     from app.database.models import Video
     video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
@@ -242,8 +242,9 @@ async def attach_audio(vimeo_id: str, background_tasks: BackgroundTasks, db: Ses
         video.mux_asset_id,
         video.vimeo_id,
         video.vimeo_url,
+        language,
     )
-    return {"status": "queued", "vimeo_id": vimeo_id, "mux_asset_id": video.mux_asset_id}
+    return {"status": "queued", "vimeo_id": vimeo_id, "mux_asset_id": video.mux_asset_id, "language": language or "all"}
 
 
 @router.post("/folder-migration")
