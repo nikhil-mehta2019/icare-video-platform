@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks 
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
@@ -10,6 +10,7 @@ from app.schemas.response_models import MigrationResponse
 from app.schemas.request_models import BulkMigrationRequest
 from app.services.mux_service import get_all_assets, delete_asset, add_public_playback_id, add_signed_playback_id
 from app.services.migration_service import process_single_video
+from app.services.audio_service import attach_audio_tracks_background
 from typing import Optional
 from app.services.migration_service import run_folder_migration
 
@@ -219,6 +220,30 @@ async def remigrate_single_video(vimeo_id: str, db: Session = Depends(get_db)):
         return {"status": "success", "vimeo_id": vimeo_id, "mux_result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Re-migration failed: {str(e)}")
+
+
+@router.post("/attach-audio/{vimeo_id}")
+async def attach_audio(vimeo_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Manually re-triggers audio attachment for an already-migrated video.
+    Use this to retry failed/missing audio tracks without re-uploading the video.
+    """
+    from app.database.models import Video
+    video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found in database.")
+    if not video.mux_asset_id:
+        raise HTTPException(status_code=400, detail="Video has no Mux asset ID.")
+    if not video.vimeo_url:
+        raise HTTPException(status_code=400, detail="Video has no Vimeo URL stored.")
+
+    background_tasks.add_task(
+        attach_audio_tracks_background,
+        video.mux_asset_id,
+        video.vimeo_id,
+        video.vimeo_url,
+    )
+    return {"status": "queued", "vimeo_id": vimeo_id, "mux_asset_id": video.mux_asset_id}
 
 
 @router.post("/folder-migration")
