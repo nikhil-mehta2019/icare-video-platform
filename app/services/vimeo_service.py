@@ -97,14 +97,24 @@ def get_video_captions(vimeo_id):
         data = response.json()
         tracks = data.get("data", [])
         
-        captions = []
+        # Deduplicate by language: prefer human captions over auto-generated ones.
+        # Mux rejects uploads with duplicate track names for the same language.
+        seen = {}  # language -> caption dict
         for track in tracks:
-            if track.get("link") and track.get("type") in ["captions", "subtitles"]:
-                captions.append({
+            if not track.get("link") or track.get("type") not in ["captions", "subtitles"]:
+                continue
+            lang = track.get("language") or "unknown"
+            is_autogen = "autogen" in lang.lower() or "autogen" in (track.get("name") or "").lower()
+            if lang not in seen or (seen[lang]["autogen"] and not is_autogen):
+                seen[lang] = {
                     "url": track["link"],
-                    "language": track.get("language"), 
-                    "name": track.get("name")          
-                })
+                    "language": lang,
+                    "name": track.get("name"),
+                    "autogen": is_autogen,
+                }
+
+        captions = [{"url": v["url"], "language": v["language"], "name": v["name"]} for v in seen.values()]
+        logger.info(f"[Vimeo Service] Found {len(captions)} unique caption track(s) for {vimeo_id}: {[c['language'] for c in captions]}")
         return captions
     except Exception as e:
         logger.error(f"[Vimeo Service] Error fetching captions for {vimeo_id}: {str(e)}")
