@@ -231,13 +231,23 @@ def get_vimeo_page(url=None, custom_start_url=None):
     return page_videos, next_url
 
 def get_vimeo_folder_videos(folder_id: str):
-    """Specifically fetches videos from a Vimeo project/folder ID."""
-    url = f"https://api.vimeo.com/me/projects/{folder_id}/videos?per_page=100"
+    """Fetches ALL videos from a Vimeo project/folder, paginating until complete."""
     headers = {"Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"}
-    response = requests.get(url, headers=headers, timeout=(5, 60))
+    url = f"https://api.vimeo.com/me/projects/{folder_id}/videos?per_page=100"
+    all_videos = []
 
-    if response.status_code != 200:
-        logger.error(f"Vimeo API Error: {response.text}")
-        raise Exception(f"Failed to fetch folder: {response.status_code}")
+    while url:
+        logger.info(f"[Vimeo Service] Fetching folder page: {url.split('.com')[-1]}")
+        response = requests.get(url, headers=headers, timeout=(5, 60))
+        if response.status_code != 200:
+            logger.error(f"[Vimeo Service] Vimeo API Error: {response.text}")
+            raise Exception(f"Failed to fetch folder: {response.status_code}")
 
-    return response.json().get("data", [])
+        data = response.json()
+        all_videos.extend(data.get("data", []))
+
+        next_page = data.get("paging", {}).get("next")
+        url = f"https://api.vimeo.com{next_page}" if next_page else None
+
+    logger.info(f"[Vimeo Service] Folder {folder_id}: fetched {len(all_videos)} total videos.")
+    return all_videos
