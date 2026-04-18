@@ -9,7 +9,7 @@ from app.config import MUX_TOKEN_ID, MUX_TOKEN_SECRET, MUX_PRIVATE_KEY, MUX_SIGN
 BASE_URL = "https://api.mux.com/video/v1"
 logger = logging.getLogger(__name__)
 
-def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None):
+def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None, folder_name=None):
     logger.info(f"[Mux Service] Starting upload_video for title: '{title}'")
     
     inputs = [{"url": video_url}]
@@ -49,7 +49,8 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None):
         "encoding_tier": "smart",         # Requires paid plan — enables multiple audio tracks
         "meta": {
             "title": safe_title
-        }
+        },
+        "passthrough": folder_name[:255] if folder_name else "",
     }
 
     logger.info(f"[Mux Service] Dispatching POST request to Mux API...")

@@ -12,7 +12,7 @@ from app.services.mux_service import upload_video, add_signed_playback_id, wait_
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:\t  %(message)s")
 logger = logging.getLogger(__name__)
 
-def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
+def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folder_name=None):
     logger.info(f"[Migration Worker] Starting processing for Vimeo ID: {vimeo_id} ({title})")
     
     logger.info(f"[Migration Worker] Checking if {vimeo_id} already exists in database...")
@@ -37,7 +37,8 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None):
             video_url=download_url,
             title=title,
             captions=captions,
-            audio_tracks=[]
+            audio_tracks=[],
+            folder_name=folder_name,
         )
 
         mux_asset_id = mux_data["asset_id"]
@@ -206,22 +207,23 @@ async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
         
         # 3. Filter out videos already in our 'videos' table (Duplicate Prevention)
         existing_ids = {v[0] for v in db.query(Video.vimeo_id).all()}
-        new_videos = [v for v in all_videos if v["uri"].split("/")[-1] not in existing_ids]
-        
+        new_videos = [item for item in all_videos if item["video"]["uri"].split("/")[-1] not in existing_ids]
+
         # 4. Apply limit to the NEXT available videos
         to_migrate = new_videos[:limit] if limit else new_videos
         job.total_videos = len(to_migrate)
         db.commit()
 
-        for v in to_migrate:
+        for item in to_migrate:
             db.refresh(job)
             if job.status == "cancelled": break
 
+            v = item["video"]
+            folder_name = item["folder_name"]
             vimeo_id = v["uri"].split("/")[-1]
             try:
-                # Reuse process_single_video to handle Mux upload and DB save
                 await asyncio.to_thread(
-                    process_single_video, db, v.get("name"), v.get("link"), vimeo_id, f"Folder {folder_id}"
+                    process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name
                 )
                 job.imported_videos += 1
             except Exception as e:

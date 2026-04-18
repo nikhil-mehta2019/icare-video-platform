@@ -230,24 +230,37 @@ def get_vimeo_page(url=None, custom_start_url=None):
 
     return page_videos, next_url
 
-def get_vimeo_folder_videos(folder_id: str):
-    """Fetches ALL videos from a Vimeo project/folder, paginating until complete."""
+def get_vimeo_folder_videos(folder_id: str) -> list:
+    """
+    Fetches ALL videos from a Vimeo folder, recursively traversing sub-folders.
+    Returns list of dicts: [{"video": {...}, "folder_name": str}, ...]
+    folder_name is the immediate parent sub-folder name, stored as Mux passthrough metadata.
+    """
     headers = {"Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"}
-    url = f"https://api.vimeo.com/me/projects/{folder_id}/videos?per_page=100"
     all_videos = []
 
-    while url:
-        logger.info(f"[Vimeo Service] Fetching folder page: {url.split('.com')[-1]}")
-        response = requests.get(url, headers=headers, timeout=(5, 60))
-        if response.status_code != 200:
-            logger.error(f"[Vimeo Service] Vimeo API Error: {response.text}")
-            raise Exception(f"Failed to fetch folder: {response.status_code}")
+    def _fetch_folder(fid: str, folder_name: str):
+        url = f"https://api.vimeo.com/me/projects/{fid}/items?per_page=100"
+        while url:
+            logger.info(f"[Vimeo Service] Fetching folder '{folder_name}': {url.split('.com')[-1]}")
+            response = requests.get(url, headers=headers, timeout=(5, 60))
+            if response.status_code != 200:
+                logger.error(f"[Vimeo Service] Vimeo API Error: {response.text}")
+                raise Exception(f"Failed to fetch folder {fid}: {response.status_code}")
 
-        data = response.json()
-        all_videos.extend(data.get("data", []))
+            data = response.json()
+            for item in data.get("data", []):
+                if item.get("type") == "video":
+                    all_videos.append({"video": item["video"], "folder_name": folder_name})
+                elif item.get("type") == "folder":
+                    sub_id = item["folder"]["uri"].split("/projects/")[-1]
+                    sub_name = item["folder"].get("name", sub_id)
+                    logger.info(f"[Vimeo Service] Found sub-folder '{sub_name}', recursing...")
+                    _fetch_folder(sub_id, sub_name)
 
-        next_page = data.get("paging", {}).get("next")
-        url = f"https://api.vimeo.com{next_page}" if next_page else None
+            next_page = data.get("paging", {}).get("next")
+            url = f"https://api.vimeo.com{next_page}" if next_page else None
 
-    logger.info(f"[Vimeo Service] Folder {folder_id}: fetched {len(all_videos)} total videos.")
+    _fetch_folder(folder_id, "Root")
+    logger.info(f"[Vimeo Service] Folder {folder_id}: fetched {len(all_videos)} total videos across all sub-folders.")
     return all_videos
