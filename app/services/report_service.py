@@ -4,14 +4,15 @@ from app.database.session import SessionLocal
 from app.database.models import Video
 
 def generate_migration_excel() -> BytesIO:
-    """Queries the database and returns an in-memory Excel file of the mapping."""
+    """Queries the database and returns an in-memory Excel file of the migration mapping,
+    with one sheet per Vimeo folder and a combined 'All Videos' sheet."""
     db = SessionLocal()
     try:
         videos = db.query(Video).all()
-        
-        data = []
+
+        rows = []
         for v in videos:
-            data.append({
+            rows.append({
                 "Vimeo ID": v.vimeo_id,
                 "Vimeo Title": v.vimeo_title,
                 "Vimeo Folder Path": v.vimeo_folder_path or "Root",
@@ -23,30 +24,34 @@ def generate_migration_excel() -> BytesIO:
                 "Captions Count": v.captions_count,
                 "Captions Languages": v.captions_languages or "None",
                 "Audio Tracks Count": v.audio_tracks_count,
-                "Audio Languages": v.audio_languages or "None"
+                "Audio Languages": v.audio_languages or "None",
+                "Migrated At": v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else "",
             })
 
-        df = pd.DataFrame(data)
-        
+        df_all = pd.DataFrame(rows)
+
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Migration Mapping')
-            
-            # Auto-adjust column widths for readability
-            worksheet = writer.sheets['Migration Mapping']
-            for col in worksheet.columns:
-                max_length = 0
-                column = col[0].column_letter
-                for cell in col:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(cell.value)
-                    except:
-                        pass
-                adjusted_width = (max_length + 2)
-                worksheet.column_dimensions[column].width = adjusted_width
+            _write_sheet(writer, df_all, "All Videos")
+
+            for folder in sorted(df_all["Vimeo Folder Path"].unique()):
+                df_folder = df_all[df_all["Vimeo Folder Path"] == folder].copy()
+                # Excel sheet names max 31 chars, strip illegal characters
+                sheet_name = folder[:31].translate(str.maketrans('', '', r'\/:*?[]'))
+                _write_sheet(writer, df_folder, sheet_name)
 
         output.seek(0)
         return output
     finally:
         db.close()
+
+
+def _write_sheet(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str):
+    df.to_excel(writer, index=False, sheet_name=sheet_name)
+    worksheet = writer.sheets[sheet_name]
+    for col in worksheet.columns:
+        max_length = max(
+            (len(str(cell.value)) for cell in col if cell.value is not None),
+            default=10,
+        )
+        worksheet.column_dimensions[col[0].column_letter].width = min(max_length + 2, 60)
