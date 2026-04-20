@@ -1,3 +1,4 @@
+import time
 import requests
 import logging
 from app.config import VIMEO_ACCESS_TOKEN
@@ -243,8 +244,14 @@ def get_vimeo_folder_videos(folder_id: str) -> list:
         url = f"https://api.vimeo.com/me/projects/{fid}/items?per_page=100"
         while url:
             logger.info(f"[Vimeo Service] Fetching folder '{folder_name}': {url.split('.com')[-1]}")
-            response = requests.get(url, headers=headers, timeout=(5, 60))
-            if response.status_code != 200:
+            for attempt in range(1, 5):
+                response = requests.get(url, headers=headers, timeout=(5, 90))
+                if response.status_code == 200:
+                    break
+                wait = 2 ** attempt
+                logger.warning(f"[Vimeo Service] HTTP {response.status_code} fetching folder '{folder_name}' (attempt {attempt}/4), retrying in {wait}s...")
+                time.sleep(wait)
+            else:
                 logger.error(f"[Vimeo Service] Vimeo API Error: {response.text}")
                 raise Exception(f"Failed to fetch folder {fid}: {response.status_code}")
 
