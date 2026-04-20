@@ -1,7 +1,7 @@
 import pandas as pd
 from io import BytesIO
 from app.database.session import SessionLocal
-from app.database.models import Video
+from app.database.models import Video, MigrationError
 
 def generate_migration_excel() -> BytesIO:
     """Queries the database and returns an in-memory Excel file of the migration mapping,
@@ -30,15 +30,28 @@ def generate_migration_excel() -> BytesIO:
 
         df_all = pd.DataFrame(rows)
 
+        errors = db.query(MigrationError).all()
+        error_rows = [
+            {
+                "Vimeo ID": e.vimeo_id,
+                "Error Message": e.error_message,
+                "Failed At": e.created_at.strftime("%Y-%m-%d %H:%M:%S") if e.created_at else "",
+            }
+            for e in errors
+        ]
+        df_errors = pd.DataFrame(error_rows)
+
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             _write_sheet(writer, df_all, "All Videos")
 
             for folder in sorted(df_all["Vimeo Folder Path"].unique()):
                 df_folder = df_all[df_all["Vimeo Folder Path"] == folder].copy()
-                # Excel sheet names max 31 chars, strip illegal characters
                 sheet_name = folder[:31].translate(str.maketrans('', '', r'\/:*?[]'))
                 _write_sheet(writer, df_folder, sheet_name)
+
+            if not df_errors.empty:
+                _write_sheet(writer, df_errors, "Failed Videos")
 
         output.seek(0)
         return output

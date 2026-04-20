@@ -229,6 +229,7 @@ async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
             except Exception as e:
                 logger.error(f"[Folder Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
                 job.failed_videos += 1
+                db.add(MigrationError(job_id=job.id, vimeo_id=vimeo_id, error_message=str(e)))
             db.commit()
 
         job.status = "completed"

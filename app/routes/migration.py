@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
-from app.database.models import MigrationJob
+from app.database.models import MigrationJob, MigrationError
 from app.services.migration_service import run_bulk_migration
 from app.services.report_service import generate_migration_excel
 from app.schemas.response_models import MigrationResponse
@@ -57,6 +57,26 @@ def export_migration_report():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=vimeo_mux_mapping.xlsx"}
     )
+
+@router.get("/errors/{job_id}")
+def get_migration_errors(job_id: int, db: Session = Depends(get_db)):
+    """Return all failed videos for a migration job."""
+    job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Migration job not found")
+    errors = db.query(MigrationError).filter(MigrationError.job_id == job_id).all()
+    return {
+        "job_id": job_id,
+        "failed_count": len(errors),
+        "errors": [
+            {
+                "vimeo_id": e.vimeo_id,
+                "error_message": e.error_message,
+                "failed_at": e.created_at.strftime("%Y-%m-%d %H:%M:%S") if e.created_at else None,
+            }
+            for e in errors
+        ],
+    }
 
 @router.get("/status/{job_id}")
 def get_migration_status(job_id: int, db: Session = Depends(get_db)):
