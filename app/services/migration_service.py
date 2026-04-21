@@ -214,51 +214,66 @@ async def run_bulk_migration(job_id: int, limit: int = None, folder_id: str = No
 async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
     jlog = _get_job_logger(job_id)
     jlog.info(f"[Folder Migration] Starting Job ID: {job_id} | folder: {folder_url}")
-    db = SessionLocal()
-    job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
-
     try:
         # 1. Extract Folder ID from URL
-        # Format: https://vimeo.com/user/141270659/folder/28548971
         folder_id = folder_url.split("/folder/")[-1].split("?")[0]
-        
-        # 2. Fetch all videos in that folder
-        from app.services.vimeo_service import get_vimeo_folder_videos 
+
+        # 2. Fetch all videos (no DB session held during the long network call)
+        from app.services.vimeo_service import get_vimeo_folder_videos
         all_videos = await asyncio.to_thread(get_vimeo_folder_videos, folder_id)
-        
-        # 3. Filter out videos already in our 'videos' table (Duplicate Prevention)
-        existing_ids = {v[0] for v in db.query(Video.vimeo_id).all()}
-        new_videos = [item for item in all_videos if item["video"]["uri"].split("/")[-1] not in existing_ids]
 
-        # 4. Apply limit to the NEXT available videos
-        to_migrate = new_videos[:limit] if limit else new_videos
-        job.total_videos = len(to_migrate)
-        db.commit()
+        # 3. Short-lived session to read existing IDs and set total_videos
+        with SessionLocal() as db:
+            existing_ids = {v[0] for v in db.query(Video.vimeo_id).all()}
+            new_videos = [item for item in all_videos if item["video"]["uri"].split("/")[-1] not in existing_ids]
+            to_migrate = new_videos[:limit] if limit else new_videos
+            job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+            job.total_videos = len(to_migrate)
+            db.commit()
 
+        # 4. Process each video with its own short-lived session
+        imported, failed = 0, 0
         for item in to_migrate:
-            db.refresh(job)
-            if job.status == "cancelled": break
+            # Check cancellation
+            with SessionLocal() as db:
+                job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+                if job.status == "cancelled":
+                    jlog.info(f"[Folder Migration] 🛑 Job {job_id} cancelled.")
+                    return
 
             v = item["video"]
             folder_name = item["folder_name"]
             vimeo_id = v["uri"].split("/")[-1]
-            jlog.info(f"[Folder Migration] Processing {job.imported_videos + job.failed_videos + 1}/{job.total_videos} — Vimeo ID: {vimeo_id} ({v.get('name', 'Untitled')})")
-            try:
-                await asyncio.to_thread(
-                    process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name
-                )
-                job.imported_videos += 1
-            except Exception as e:
-                jlog.error(f"[Folder Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
-                job.failed_videos += 1
-                db.add(MigrationError(job_id=job.id, vimeo_id=vimeo_id, error_message=str(e)))
-            db.commit()
+            jlog.info(f"[Folder Migration] Processing {imported + failed + 1}/{len(to_migrate)} — Vimeo ID: {vimeo_id} ({v.get('name', 'Untitled')})")
 
-        job.status = "completed"
-        jlog.info(f"[Folder Migration] ✅ Job {job_id} completed. Imported: {job.imported_videos}, Failed: {job.failed_videos}")
+            with SessionLocal() as db:
+                try:
+                    await asyncio.to_thread(
+                        process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name
+                    )
+                    imported += 1
+                except Exception as e:
+                    jlog.error(f"[Folder Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
+                    failed += 1
+                    db.rollback()
+                    db.add(MigrationError(job_id=job_id, vimeo_id=vimeo_id, error_message=str(e)))
+
+                job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+                job.imported_videos = imported
+                job.failed_videos = failed
+                db.commit()
+
+        with SessionLocal() as db:
+            job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+            job.status = "completed"
+            job.imported_videos = imported
+            job.failed_videos = failed
+            db.commit()
+        jlog.info(f"[Folder Migration] ✅ Job {job_id} completed. Imported: {imported}, Failed: {failed}")
+
     except Exception as e:
         jlog.error(f"[Folder Migration] 🚨 FAILED for job {job_id}: {str(e)}")
-        job.status = "failed"
-    finally:
-        db.commit()
-        db.close()
+        with SessionLocal() as db:
+            job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+            job.status = "failed"
+            db.commit()
