@@ -1,3 +1,4 @@
+import os
 import logging
 import asyncio
 from app.database.session import SessionLocal
@@ -11,6 +12,26 @@ from app.services.mux_service import upload_video, add_signed_playback_id, wait_
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:\t  %(message)s")
 logger = logging.getLogger(__name__)
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+
+def _get_job_logger(job_id: int) -> logging.Logger:
+    """Returns a logger that writes to logs/migration_job_{job_id}.log in addition to the root handlers."""
+    job_logger = logging.getLogger(f"migration.job.{job_id}")
+    if job_logger.handlers:
+        return job_logger  # already set up
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    fh = logging.FileHandler(os.path.join(LOGS_DIR, f"migration_job_{job_id}.log"), encoding="utf-8")
+    fh.setFormatter(formatter)
+    fh.setLevel(logging.INFO)
+    job_logger.addHandler(fh)
+    job_logger.setLevel(logging.INFO)
+    return job_logger
 
 def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folder_name=None):
     logger.info(f"[Migration Worker] Starting processing for Vimeo ID: {vimeo_id} ({title})")
@@ -87,7 +108,8 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folde
         raise e
 
 async def run_bulk_migration(job_id: int, limit: int = None, folder_id: str = None):
-    logger.info(f"[Bulk Runner] Initializing Page-by-Page Migration for Job ID: {job_id}")
+    jlog = _get_job_logger(job_id)
+    jlog.info(f"[Bulk Runner] Initializing Page-by-Page Migration for Job ID: {job_id}")
     db = SessionLocal()
     job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
     
@@ -99,103 +121,102 @@ async def run_bulk_migration(job_id: int, limit: int = None, folder_id: str = No
     custom_start_url = None
     if folder_id:
         custom_start_url = f"https://api.vimeo.com/me/projects/{folder_id}/videos?per_page=50"
-        logger.info(f"[Bulk Runner] Targeting specific Vimeo Folder ID: {folder_id}")
+        jlog.info(f"[Bulk Runner] Targeting specific Vimeo Folder ID: {folder_id}")
 
     job.total_videos = target_limit if target_limit else 0
     db.commit()
-    
+
     try:
         while True:
             db.refresh(job)
             if job.status == "cancelled":
-                logger.info(f"[Bulk Runner] 🛑 Cancellation signal detected!")
-                break
-                
-            if target_limit and processed_count >= target_limit:
-                logger.info(f"[Bulk Runner] 🎯 Reached requested limit of {target_limit} new videos. Stopping.")
+                jlog.info(f"[Bulk Runner] 🛑 Cancellation signal detected!")
                 break
 
-            # Pass the custom URL into the page fetcher
+            if target_limit and processed_count >= target_limit:
+                jlog.info(f"[Bulk Runner] 🎯 Reached requested limit of {target_limit} new videos. Stopping.")
+                break
+
             page_videos, next_url = await asyncio.to_thread(get_vimeo_page, url, custom_start_url)
-            
+
             if not page_videos:
-                logger.info("[Bulk Runner] No more videos found on Vimeo.")
+                jlog.info("[Bulk Runner] No more videos found on Vimeo.")
                 break
 
             existing_videos = db.query(Video.vimeo_id).all()
             migrated_ids = {v[0] for v in existing_videos}
-            
+
             unmigrated_videos = []
             for v in page_videos:
                 vimeo_id = v["uri"].split("/")[-1]
                 if vimeo_id not in migrated_ids:
                     unmigrated_videos.append(v)
-                    
-            logger.info(f"[Bulk Runner] Page scanned: {len(page_videos)} videos found, {len(unmigrated_videos)} are new.")
+
+            jlog.info(f"[Bulk Runner] Page scanned: {len(page_videos)} videos found, {len(unmigrated_videos)} are new.")
 
             for v in unmigrated_videos:
                 db.refresh(job)
                 if job.status == "cancelled" or (target_limit and processed_count >= target_limit):
-                    break 
+                    break
 
                 vimeo_id = v["uri"].split("/")[-1]
                 folder_path = extract_folder_path(v)
                 vimeo_url = v.get("link", f"https://vimeo.com/{vimeo_id}")
                 title = v.get("name", "Untitled")
-                
+
                 if not target_limit:
                     job.total_videos = processed_count + 1
 
-                logger.info(f"[Bulk Runner] --- Processing Video {processed_count + 1} (Vimeo ID: {vimeo_id}) ---")
-                
+                jlog.info(f"[Bulk Runner] --- Processing Video {processed_count + 1} (Vimeo ID: {vimeo_id}) ---")
+
                 try:
                     result = await asyncio.to_thread(
                         process_single_video, db, title, vimeo_url, vimeo_id, folder_path
                     )
-                    
+
                     if result.get("status") in ["success", "skipped"]:
                         job.imported_videos += 1
-                        
+
                 except Exception as e:
-                    logger.error(f"[Bulk Runner] ❌ Migration loop caught failure for {vimeo_id}: {str(e)}")
+                    jlog.error(f"[Bulk Runner] ❌ Migration loop caught failure for {vimeo_id}: {str(e)}")
                     job.failed_videos += 1
-                    
-                    error_log = MigrationError(job_id=job.id, vimeo_id=vimeo_id, error_message=str(e))
-                    db.add(error_log)
-                
+                    db.add(MigrationError(job_id=job.id, vimeo_id=vimeo_id, error_message=str(e)))
+
                 processed_count += 1
                 db.commit()
-                
+
                 if target_limit:
                     percent_complete = round((processed_count) / target_limit * 100, 1)
-                    logger.info(f"[Bulk Runner] Job Progress: {percent_complete}%")
-                
-                await asyncio.sleep(1) 
+                    jlog.info(f"[Bulk Runner] Job Progress: {percent_complete}%")
+
+                await asyncio.sleep(1)
 
             if not next_url:
-                logger.info("[Bulk Runner] Reached the end of the specified Vimeo Library/Folder.")
+                jlog.info("[Bulk Runner] Reached the end of the specified Vimeo Library/Folder.")
                 break
-                
-            url = next_url 
+
+            url = next_url
 
         if job.status != "cancelled":
             job.status = "completed"
-            logger.info(f"[Bulk Runner] ✅ Bulk migration completed successfully for Job ID: {job_id}")
+            jlog.info(f"[Bulk Runner] ✅ Bulk migration completed successfully for Job ID: {job_id}")
             db.commit()
 
     except Exception as e:
-        logger.error(f"[Bulk Runner] 🚨 CRITICAL FAILURE in bulk migration loop: {str(e)}")
+        jlog.error(f"[Bulk Runner] 🚨 CRITICAL FAILURE in bulk migration loop: {str(e)}")
         job.status = "failed"
         db.commit()
     finally:
-        logger.info("[Bulk Runner] Closing database session.")
+        jlog.info("[Bulk Runner] Closing database session.")
         db.close()
 
 
 async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
+    jlog = _get_job_logger(job_id)
+    jlog.info(f"[Folder Migration] Starting Job ID: {job_id} | folder: {folder_url}")
     db = SessionLocal()
     job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
-    
+
     try:
         # 1. Extract Folder ID from URL
         # Format: https://vimeo.com/user/141270659/folder/28548971
@@ -221,20 +242,22 @@ async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
             v = item["video"]
             folder_name = item["folder_name"]
             vimeo_id = v["uri"].split("/")[-1]
+            jlog.info(f"[Folder Migration] Processing {job.imported_videos + job.failed_videos + 1}/{job.total_videos} — Vimeo ID: {vimeo_id} ({v.get('name', 'Untitled')})")
             try:
                 await asyncio.to_thread(
                     process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name
                 )
                 job.imported_videos += 1
             except Exception as e:
-                logger.error(f"[Folder Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
+                jlog.error(f"[Folder Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
                 job.failed_videos += 1
                 db.add(MigrationError(job_id=job.id, vimeo_id=vimeo_id, error_message=str(e)))
             db.commit()
 
         job.status = "completed"
+        jlog.info(f"[Folder Migration] ✅ Job {job_id} completed. Imported: {job.imported_videos}, Failed: {job.failed_videos}")
     except Exception as e:
-        logger.error(f"[Folder Migration] 🚨 FAILED for job {job_id}: {str(e)}")
+        jlog.error(f"[Folder Migration] 🚨 FAILED for job {job_id}: {str(e)}")
         job.status = "failed"
     finally:
         db.commit()
