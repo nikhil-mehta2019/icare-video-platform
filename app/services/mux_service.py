@@ -19,7 +19,7 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None, 
         logger.info(f"[Mux Service] Processing {len(captions)} caption tracks...")
         for cap in captions:
             lang = cap.get("language") or "en"
-            name = cap.get("name") or "English"
+            name = lang  # use language code as name — always unique per asset
             inputs.append({
                 "url": cap["url"],
                 "type": "text",
