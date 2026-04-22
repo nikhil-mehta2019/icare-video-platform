@@ -45,6 +45,16 @@ def get_vimeo_videos(limit=None):
     logger.info(f"[Vimeo Service] ✅ Finished fetching all {len(videos)} videos from Vimeo.")
     return videos
 
+def get_video_metadata(vimeo_id):
+    """Returns (title, vimeo_url) for a single Vimeo video."""
+    url = f"https://api.vimeo.com/videos/{vimeo_id}"
+    headers = {"Authorization": f"Bearer {VIMEO_ACCESS_TOKEN}"}
+    response = requests.get(url, headers=headers, timeout=(5, 60))
+    if response.status_code != 200:
+        raise Exception(f"Vimeo API error fetching metadata: {response.text}")
+    data = response.json()
+    return data.get("name", "Untitled"), data.get("link", f"https://vimeo.com/{vimeo_id}")
+
 def get_video_download_url(vimeo_id):
     url = f"https://api.vimeo.com/videos/{vimeo_id}"
     headers = {

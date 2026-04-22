@@ -12,7 +12,8 @@ from app.services.mux_service import get_all_assets, delete_asset, add_public_pl
 from app.services.migration_service import process_single_video
 from app.services.audio_service import attach_audio_tracks_background
 from typing import Optional
-from app.services.migration_service import run_folder_migration
+from app.services.migration_service import run_folder_migration, run_ids_migration
+from typing import List
 
 router = APIRouter(prefix="/migration", tags=["Migration"])
 
@@ -292,6 +293,32 @@ async def start_folder_migration(
     background_tasks.add_task(run_folder_migration, job.id, folder_id, limit)
 
     return {"status": "Folder migration started", "job_id": job.id, "folder_id": folder_id}
+
+
+@router.post("/migrate-ids")
+async def migrate_ids(
+    vimeo_ids: List[str],
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Migrate a specific list of Vimeo IDs. Already-migrated IDs are skipped automatically.
+    Pass Vimeo IDs as a JSON array: ["123456", "789012", ...]
+    """
+    if not vimeo_ids:
+        raise HTTPException(status_code=400, detail="vimeo_ids list is empty.")
+
+    if db.query(MigrationJob).filter(MigrationJob.status == "running").first():
+        raise HTTPException(status_code=400, detail="A migration is already in progress.")
+
+    job = MigrationJob(status="running", total_videos=len(vimeo_ids))
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(run_ids_migration, job.id, vimeo_ids)
+
+    return {"status": "Migration started", "job_id": job.id, "requested": len(vimeo_ids)}
 
 
 @router.get("/verify-folder")

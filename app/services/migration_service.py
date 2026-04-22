@@ -6,7 +6,7 @@ from app.database.models import MigrationJob, Video, MigrationError
 
 from app.services.vimeo_service import (
     get_video_download_url, extract_folder_path,
-    get_video_captions, get_video_audio_tracks, get_vimeo_page
+    get_video_captions, get_video_audio_tracks, get_vimeo_page, get_video_metadata
 )
 from app.services.mux_service import upload_video, add_signed_playback_id, wait_for_asset_ready, add_audio_track
 
@@ -273,6 +273,78 @@ async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
 
     except Exception as e:
         jlog.error(f"[Folder Migration] 🚨 FAILED for job {job_id}: {str(e)}")
+        with SessionLocal() as db:
+            job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+            job.status = "failed"
+            db.commit()
+
+
+async def run_ids_migration(job_id: int, vimeo_ids: list[str]):
+    """Migrates a specific list of Vimeo IDs."""
+    jlog = _get_job_logger(job_id)
+    jlog.info(f"[IDs Migration] Starting Job ID: {job_id} | {len(vimeo_ids)} video(s) requested")
+
+    try:
+        with SessionLocal() as db:
+            existing_ids = {v[0] for v in db.query(Video.vimeo_id).all()}
+            to_migrate = [vid for vid in vimeo_ids if vid not in existing_ids]
+            skipped = len(vimeo_ids) - len(to_migrate)
+            job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+            job.total_videos = len(to_migrate)
+            db.commit()
+
+        if skipped:
+            jlog.info(f"[IDs Migration] Skipping {skipped} already-migrated video(s).")
+
+        imported, failed = 0, 0
+        for i, vimeo_id in enumerate(to_migrate):
+            with SessionLocal() as db:
+                job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+                if job.status == "cancelled":
+                    jlog.info(f"[IDs Migration] 🛑 Job {job_id} cancelled.")
+                    return
+
+            jlog.info(f"[IDs Migration] Processing {i + 1}/{len(to_migrate)} — Vimeo ID: {vimeo_id}")
+            try:
+                title, vimeo_url = await asyncio.to_thread(get_video_metadata, vimeo_id)
+            except Exception as e:
+                jlog.error(f"[IDs Migration] ❌ Could not fetch metadata for {vimeo_id}: {str(e)}")
+                failed += 1
+                with SessionLocal() as db:
+                    db.add(MigrationError(job_id=job_id, vimeo_id=vimeo_id, error_message=str(e)))
+                    job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+                    job.imported_videos = imported
+                    job.failed_videos = failed
+                    db.commit()
+                continue
+
+            with SessionLocal() as db:
+                try:
+                    await asyncio.to_thread(
+                        process_single_video, db, title, vimeo_url, vimeo_id
+                    )
+                    imported += 1
+                except Exception as e:
+                    jlog.error(f"[IDs Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
+                    failed += 1
+                    db.rollback()
+                    db.add(MigrationError(job_id=job_id, vimeo_id=vimeo_id, error_message=str(e)))
+
+                job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+                job.imported_videos = imported
+                job.failed_videos = failed
+                db.commit()
+
+        with SessionLocal() as db:
+            job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+            job.status = "completed"
+            job.imported_videos = imported
+            job.failed_videos = failed
+            db.commit()
+        jlog.info(f"[IDs Migration] ✅ Job {job_id} completed. Imported: {imported}, Failed: {failed}")
+
+    except Exception as e:
+        jlog.error(f"[IDs Migration] 🚨 FAILED for job {job_id}: {str(e)}")
         with SessionLocal() as db:
             job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
             job.status = "failed"
