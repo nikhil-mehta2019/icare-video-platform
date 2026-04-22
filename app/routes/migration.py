@@ -292,3 +292,57 @@ async def start_folder_migration(
     background_tasks.add_task(run_folder_migration, job.id, folder_id, limit)
 
     return {"status": "Folder migration started", "job_id": job.id, "folder_id": folder_id}
+
+
+@router.get("/verify-folder")
+async def verify_folder_migration(folder_url: str, db: Session = Depends(get_db)):
+    """
+    Fetches all videos from a Vimeo folder and checks which are migrated to Mux.
+    Returns counts and lists of migrated, pending, and failed videos.
+    """
+    from app.database.models import Video
+    from app.services.vimeo_service import get_vimeo_folder_videos
+    import asyncio
+
+    try:
+        folder_id = folder_url.split("/folder/")[-1].split("?")[0]
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Vimeo folder URL")
+
+    try:
+        all_videos = await asyncio.to_thread(get_vimeo_folder_videos, folder_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch Vimeo folder: {str(e)}")
+
+    migrated, pending, failed = [], [], []
+
+    for item in all_videos:
+        v = item["video"]
+        vimeo_id = v["uri"].split("/")[-1]
+        title = v.get("name", "Untitled")
+        record = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+
+        entry = {"vimeo_id": vimeo_id, "title": title}
+        if record and record.mux_asset_id:
+            entry["mux_asset_id"] = record.mux_asset_id
+            entry["mux_playback_id"] = record.mux_playback_id
+            entry["status"] = record.status
+            migrated.append(entry)
+        elif record:
+            entry["status"] = record.status or "processing"
+            failed.append(entry)
+        else:
+            pending.append(entry)
+
+    total = len(all_videos)
+    return {
+        "folder_id": folder_id,
+        "total_in_vimeo": total,
+        "migrated_count": len(migrated),
+        "pending_count": len(pending),
+        "failed_count": len(failed),
+        "all_migrated": len(migrated) == total,
+        "migrated": migrated,
+        "pending": pending,
+        "failed": failed,
+    }
