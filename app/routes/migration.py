@@ -324,12 +324,13 @@ async def migrate_ids(
 @router.get("/verify-folder")
 async def verify_folder_migration(folder_url: str, db: Session = Depends(get_db)):
     """
-    Fetches all videos from a Vimeo folder and checks which are migrated to Mux.
-    Returns counts and lists of migrated, pending, and failed videos.
+    Fetches all videos from a Vimeo folder (including sub-folders), checks migration
+    status against the DB, and returns an Excel file with one sheet per Vimeo folder name.
     """
     from app.database.models import Video
     from app.services.vimeo_service import get_vimeo_folder_videos
-    import asyncio
+    from io import BytesIO
+    import pandas as pd
 
     try:
         folder_id = folder_url.split("/folder/")[-1].split("?")[0]
@@ -341,35 +342,73 @@ async def verify_folder_migration(folder_url: str, db: Session = Depends(get_db)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch Vimeo folder: {str(e)}")
 
-    migrated, pending, failed = [], [], []
-
+    rows = []
     for item in all_videos:
         v = item["video"]
         vimeo_id = v["uri"].split("/")[-1]
-        title = v.get("name", "Untitled")
+        folder_name = item.get("folder_name", "Root")
         record = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
 
-        entry = {"vimeo_id": vimeo_id, "title": title}
         if record and record.mux_asset_id:
-            entry["mux_asset_id"] = record.mux_asset_id
-            entry["mux_playback_id"] = record.mux_playback_id
-            entry["status"] = record.status
-            migrated.append(entry)
+            migration_status = "Migrated"
         elif record:
-            entry["status"] = record.status or "processing"
-            failed.append(entry)
+            migration_status = "Processing"
         else:
-            pending.append(entry)
+            migration_status = "Pending"
 
-    total = len(all_videos)
-    return {
-        "folder_id": folder_id,
-        "total_in_vimeo": total,
-        "migrated_count": len(migrated),
-        "pending_count": len(pending),
-        "failed_count": len(failed),
-        "all_migrated": len(migrated) == total,
-        "migrated": migrated,
-        "pending": pending,
-        "failed": failed,
-    }
+        rows.append({
+            "Vimeo ID": vimeo_id,
+            "Vimeo Title": v.get("name", "Untitled"),
+            "Vimeo Folder Path": folder_name,
+            "Vimeo URL": v.get("link", f"https://vimeo.com/{vimeo_id}"),
+            "Mux Asset ID": record.mux_asset_id if record else "",
+            "Mux Playback ID": record.mux_playback_id if record else "",
+            "Mux Player URL": f"https://player.mux.com/{record.mux_playback_id}" if record and record.mux_playback_id else "",
+            "Mux Stream URL": record.mux_stream_url if record else "",
+            "Captions Count": record.captions_count if record else "",
+            "Captions Languages": record.captions_languages if record else "",
+            "Audio Tracks Count": record.audio_tracks_count if record else "",
+            "Audio Languages": record.audio_languages if record else "",
+            "Migrated At": record.created_at.strftime("%Y-%m-%d %H:%M:%S") if record and record.created_at else "",
+            "Migration Status": migration_status,
+        })
+
+    df_all = pd.DataFrame(rows)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        _write_verify_sheet(writer, df_all, "All Videos")
+        for folder_name in sorted(df_all["Vimeo Folder Path"].unique()):
+            df_folder = df_all[df_all["Vimeo Folder Path"] == folder_name].copy()
+            sheet_name = folder_name.translate(str.maketrans("", "", r'\/:*?[]'))[:31]
+            _write_verify_sheet(writer, df_folder, sheet_name)
+
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=verify_folder_{folder_id}.xlsx"},
+    )
+
+
+def _write_verify_sheet(writer, df, sheet_name):
+    import pandas as pd
+    df.to_excel(writer, index=False, sheet_name=sheet_name)
+    ws = writer.sheets[sheet_name]
+
+    # Colour rows by status
+    from openpyxl.styles import PatternFill
+    green  = PatternFill("solid", fgColor="C6EFCE")
+    yellow = PatternFill("solid", fgColor="FFEB9C")
+    red    = PatternFill("solid", fgColor="FFC7CE")
+    status_col = df.columns.get_loc("Migration Status") + 1  # 1-based
+
+    for row_idx, status in enumerate(df["Migration Status"], start=2):
+        fill = green if status == "Migrated" else yellow if status == "Processing" else red
+        for cell in ws[row_idx]:
+            cell.fill = fill
+
+    # Auto-width
+    for col in ws.columns:
+        max_len = max((len(str(c.value)) for c in col if c.value is not None), default=10)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 60)
