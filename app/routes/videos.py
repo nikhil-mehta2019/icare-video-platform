@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
 from app.database.models import Video, UserCourseAccess, VideoProgress
-from app.services.mux_service import generate_playback_token, generate_download_token
+from app.services.mux_service import generate_playback_token, generate_download_token, generate_drm_license_token, generate_offline_license_token
+from app.config import DRM_CONFIGURATION_ID
 from app.services.migration_service import process_single_video
+from app.auth import get_current_user
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -15,10 +17,9 @@ class VimeoImportRequest(BaseModel):
     vimeo_url: str
     title: Optional[str] = "Untitled"
 
-# --- NEW: Schema for Progress Payload ---
 class ProgressUpdate(BaseModel):
     current_time: int
-    total_duration: int  # Required to calculate the 95% completion threshold
+    total_duration: int
     device_type: Optional[str] = "web"
     session_id: Optional[str] = None
 
@@ -28,11 +29,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
-# --- NEW: Simulated Auth Dependency ---
-def get_current_user(x_user_id: int = Header(..., description="Simulated Auth Token/Header")):
-    """Extracts user ID from Auth headers. Replace with real JWT decoding later."""
-    return x_user_id
 
 @router.post("/import-vimeo")
 def import_video(data: VimeoImportRequest, db: Session = Depends(get_db)):
@@ -59,7 +55,7 @@ def import_video(data: VimeoImportRequest, db: Session = Depends(get_db)):
 def get_secure_playback_data(
     vimeo_id: str, 
     course_id: int = 1, 
-    user_id: int = Depends(get_current_user), # <-- CHANGED to Header Auth
+    user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -105,7 +101,7 @@ def get_secure_playback_data(
     secure_token = generate_playback_token(video.mux_playback_id, expiration_hours=expiration_hours)
     secure_stream_url = f"https://stream.mux.com/{video.mux_playback_id}.m3u8?token={secure_token}"
 
-    return {
+    response = {
         "status": "success",
         "vimeo_id": video.vimeo_id,
         "title": video.vimeo_title or "Untitled Video",
@@ -113,9 +109,18 @@ def get_secure_playback_data(
         "secure_stream_url": secure_stream_url,
         "playback_token": secure_token,
         "token_expires_in_hours": expiration_hours,
-        "resume_from_seconds": resume_seconds, # NEW
-        "is_completed": is_completed           # NEW
+        "resume_from_seconds": resume_seconds,
+        "is_completed": is_completed,
+        "drm_enabled": bool(DRM_CONFIGURATION_ID),
     }
+
+    # DRM: provide a separate license token and license URL for the player's key request
+    if DRM_CONFIGURATION_ID:
+        license_token = generate_drm_license_token(video.mux_playback_id, expiration_hours=expiration_hours)
+        response["drm_license_token"] = license_token
+        response["drm_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_playback_id}?token={license_token}"
+
+    return response
 
 @router.get("/{vimeo_id}/download")
 def get_download_url(
@@ -147,19 +152,29 @@ def get_download_url(
     if not video.mux_signed_playback_id:
         raise HTTPException(status_code=400, detail="This video does not have a signed playback ID for downloads. Run the backfill endpoint first.")
 
-    # 3. Generate a short-lived signed download token (1 hour)
+    # 3. Generate download token and URL
     token = generate_download_token(video.mux_signed_playback_id, expiration_hours=1)
-
-    # The signed MP4 URL — only valid with the token, expires in 1 hour
     download_url = f"https://stream.mux.com/{video.mux_signed_playback_id}/high.mp4?token={token}"
 
-    return {
+    response = {
         "status": "success",
         "vimeo_id": video.vimeo_id,
         "title": video.vimeo_title,
         "download_url": download_url,
-        "token_expires_in_hours": 1
+        "token_expires_in_hours": 1,
+        "drm_enabled": bool(DRM_CONFIGURATION_ID),
     }
+
+    # DRM offline: provide a persistent license token the mobile app uses to fetch
+    # a Widevine (Android) / FairPlay (iOS) offline license before going offline.
+    if DRM_CONFIGURATION_ID:
+        offline_token = generate_offline_license_token(video.mux_signed_playback_id, expiration_hours=48)
+        response["drm_offline_license_token"] = offline_token
+        response["drm_widevine_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_signed_playback_id}?token={offline_token}"
+        response["drm_fairplay_license_url"] = f"https://license.mux.com/license/fairplay/{video.mux_signed_playback_id}?token={offline_token}"
+        response["drm_fairplay_cert_url"] = "https://license.mux.com/fairplay/cert"
+
+    return response
 
 
 # --- NEW: Progress Heartbeat API ---

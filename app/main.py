@@ -3,7 +3,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from app.routes import playback, videos, migration, webhook, batch
+from app.routes import playback, videos, migration, webhook, batch, auth
 from app.database.session import Base, engine
 
 # ── Directories ──────────────────────────────────────────────────────────────
@@ -51,6 +51,7 @@ app.mount("/temp-audio", StaticFiles(directory=TEMP_AUDIO_DIR), name="temp-audio
 # Create DB tables
 Base.metadata.create_all(bind=engine)
 
+app.include_router(auth.router)
 app.include_router(playback.router)
 app.include_router(videos.router)
 app.include_router(migration.router)

@@ -4,7 +4,7 @@ import json
 import base64
 import jwt
 import time
-from app.config import MUX_TOKEN_ID, MUX_TOKEN_SECRET, MUX_PRIVATE_KEY, MUX_SIGNING_KEY_ID
+from app.config import MUX_TOKEN_ID, MUX_TOKEN_SECRET, MUX_PRIVATE_KEY, MUX_SIGNING_KEY_ID, DRM_CONFIGURATION_ID
 
 BASE_URL = "https://api.mux.com/video/v1"
 logger = logging.getLogger(__name__)
@@ -43,13 +43,21 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None, 
             logger.info(f"[Mux Service] Added audio track input: {name} ({lang})")
 
     safe_title = title[:250] if title else "Untitled"
+
+    # DRM: if a configuration ID is set, protect the asset and use a drm playback policy.
+    # Without DRM_CONFIGURATION_ID the asset is created as public (development / non-DRM env).
+    if DRM_CONFIGURATION_ID:
+        playback_policy = [{"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}]
+        logger.info(f"[Mux Service] DRM enabled — using configuration {DRM_CONFIGURATION_ID}")
+    else:
+        playback_policy = ["public"]
+        logger.info("[Mux Service] DRM not configured — using public playback policy")
+
     payload = {
         "input": inputs,
-        "playback_policy": ["public"],
-        "encoding_tier": "smart",         # Requires paid plan — enables multiple audio tracks
-        "meta": {
-            "title": safe_title
-        },
+        "playback_policy": playback_policy,
+        "encoding_tier": "smart",
+        "meta": {"title": safe_title},
         "passthrough": folder_name[:255] if folder_name else "",
     }
 
@@ -170,15 +178,67 @@ def add_public_playback_id(asset_id: str):
     return response.json()["data"]["id"]
 
 def add_signed_playback_id(asset_id: str):
-    """Adds a signed playback ID to an existing Mux asset (used for mobile-only downloads)."""
+    """Adds a signed (or DRM) playback ID to an existing Mux asset — used for mobile downloads."""
+    if DRM_CONFIGURATION_ID:
+        body = {"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}
+    else:
+        body = {"policy": "signed"}
+
     response = requests.post(
         f"{BASE_URL}/assets/{asset_id}/playback-ids",
-        json={"policy": "signed"},
+        json=body,
         auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
     )
     if not response.ok:
         raise Exception(f"Mux API Error ({response.status_code}): {response.text}")
     return response.json()["data"]["id"]
+
+def generate_drm_license_token(playback_id: str, expiration_hours: int = 6) -> str:
+    """
+    Generates a Mux DRM license token (aud='l').
+    Required by the player alongside the stream URL when DRM is active.
+    The player sends this to Mux's license server to obtain decryption keys.
+    """
+    decoded_private_key = base64.b64decode(MUX_PRIVATE_KEY)
+    expiration_time = int(time.time()) + (expiration_hours * 3600)
+    payload = {
+        "sub": playback_id,
+        "aud": "l",
+        "exp": expiration_time,
+        "kid": MUX_SIGNING_KEY_ID,
+    }
+    return jwt.encode(payload, decoded_private_key, algorithm="RS256")
+
+
+def delete_playback_id(asset_id: str, playback_id: str):
+    """Removes a specific playback ID from a Mux asset."""
+    response = requests.delete(
+        f"{BASE_URL}/assets/{asset_id}/playback-ids/{playback_id}",
+        auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
+    )
+    if not response.ok:
+        raise Exception(f"Mux API Error ({response.status_code}): {response.text}")
+    logger.info(f"[Mux Service] ✅ Deleted playback ID {playback_id} from asset {asset_id}")
+
+
+def generate_offline_license_token(playback_id: str, expiration_hours: int = 48) -> str:
+    """
+    Generates a persistent DRM license token for offline playback (aud='l', drm_offline=true).
+    The mobile app presents this to Mux's license server once to obtain a persistent
+    Widevine (Android) or FairPlay (iOS) license that allows offline decryption.
+    Longer expiry (default 48h) gives the app time to complete the download and license fetch.
+    """
+    decoded_private_key = base64.b64decode(MUX_PRIVATE_KEY)
+    expiration_time = int(time.time()) + (expiration_hours * 3600)
+    payload = {
+        "sub": playback_id,
+        "aud": "l",
+        "exp": expiration_time,
+        "kid": MUX_SIGNING_KEY_ID,
+        "drm_offline": True,  # signals Mux to issue a persistent (offline-capable) license
+    }
+    return jwt.encode(payload, decoded_private_key, algorithm="RS256")
+
 
 def generate_download_token(signed_playback_id: str, expiration_hours: int = 1):
     """

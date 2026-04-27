@@ -8,7 +8,8 @@ from app.services.migration_service import run_bulk_migration
 from app.services.report_service import generate_migration_excel
 from app.schemas.response_models import MigrationResponse
 from app.schemas.request_models import BulkMigrationRequest
-from app.services.mux_service import get_all_assets, delete_asset, add_public_playback_id, add_signed_playback_id
+from app.services.mux_service import get_all_assets, delete_asset, add_public_playback_id, add_signed_playback_id, delete_playback_id
+from app.config import DRM_CONFIGURATION_ID
 from app.services.migration_service import process_single_video
 from app.services.audio_service import attach_audio_tracks_background
 from typing import Optional
@@ -389,6 +390,66 @@ async def verify_folder_migration(folder_url: str, db: Session = Depends(get_db)
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=verify_folder_{folder_id}.xlsx"},
     )
+
+
+@router.post("/upgrade-to-drm")
+async def upgrade_playback_ids_to_drm(db: Session = Depends(get_db)):
+    """
+    One-time backfill for already-migrated videos.
+    For each video with a signed playback ID:
+      1. Deletes the old 'signed' playback ID from Mux
+      2. Creates a new 'drm' playback ID using DRM_CONFIGURATION_ID
+      3. Updates mux_signed_playback_id in the DB
+    Safe to re-run — skips videos that already have a DRM playback ID.
+    """
+    from app.database.models import Video
+
+    if not DRM_CONFIGURATION_ID:
+        raise HTTPException(status_code=400, detail="DRM_CONFIGURATION_ID is not configured on this server.")
+
+    videos = db.query(Video).filter(
+        Video.mux_asset_id != None,
+        Video.mux_signed_playback_id != None,
+    ).all()
+
+    updated, skipped, failed = 0, 0, 0
+    results = []
+
+    for video in videos:
+        try:
+            # Inspect existing playback IDs on the Mux asset
+            from app.services.mux_service import get_asset
+            asset = await asyncio.to_thread(get_asset, video.mux_asset_id)
+            existing_policies = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
+
+            if existing_policies.get(video.mux_signed_playback_id) == "drm":
+                skipped += 1
+                results.append({"vimeo_id": video.vimeo_id, "status": "skipped", "reason": "already drm"})
+                continue
+
+            # Delete old signed playback ID if it still exists on Mux
+            if video.mux_signed_playback_id in existing_policies:
+                await asyncio.to_thread(delete_playback_id, video.mux_asset_id, video.mux_signed_playback_id)
+
+            # Create new DRM playback ID (add_signed_playback_id uses drm policy when DRM_CONFIGURATION_ID is set)
+            new_drm_id = await asyncio.to_thread(add_signed_playback_id, video.mux_asset_id)
+            video.mux_signed_playback_id = new_drm_id
+            db.commit()
+            updated += 1
+            results.append({"vimeo_id": video.vimeo_id, "status": "upgraded", "drm_playback_id": new_drm_id})
+
+        except Exception as e:
+            failed += 1
+            db.rollback()
+            results.append({"vimeo_id": video.vimeo_id, "status": "failed", "error": str(e)})
+
+    return {
+        "total": len(videos),
+        "upgraded": updated,
+        "skipped": skipped,
+        "failed": failed,
+        "results": results,
+    }
 
 
 def _write_verify_sheet(writer, df, sheet_name):

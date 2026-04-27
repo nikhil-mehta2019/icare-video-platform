@@ -9,4 +9,6 @@ python-jose
 openpyxl
 python-multipart
 yt-dlp
-PyJWT
+PyJWT[crypto]
+bcrypt
+email-validator
