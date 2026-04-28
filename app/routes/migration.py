@@ -392,83 +392,89 @@ async def verify_folder_migration(folder_url: str, db: Session = Depends(get_db)
     )
 
 
-@router.post("/upgrade-to-drm")
-async def upgrade_playback_ids_to_drm(db: Session = Depends(get_db)):
-    """
-    One-time backfill for already-migrated videos.
-    For each video with a signed playback ID:
-      1. Deletes the old 'signed' playback ID from Mux
-      2. Creates a new 'drm' playback ID using DRM_CONFIGURATION_ID
-      3. Updates mux_signed_playback_id in the DB
-    Safe to re-run — skips videos that already have a DRM playback ID.
-    """
+async def _run_drm_upgrade():
+    """Background task — processes all videos, logs progress to app.log."""
     import logging
     from app.database.models import Video
     from app.services.mux_service import get_asset
 
     log = logging.getLogger("drm_upgrade")
-    log.info("[DRM Upgrade] Starting upgrade-to-drm backfill...")
+    log.info("[DRM Upgrade] Background task started.")
 
-    if not DRM_CONFIGURATION_ID:
-        log.error("[DRM Upgrade] DRM_CONFIGURATION_ID is not set — aborting.")
-        raise HTTPException(status_code=400, detail="DRM_CONFIGURATION_ID is not configured on this server.")
+    with SessionLocal() as db:
+        videos = db.query(Video).filter(
+            Video.mux_asset_id != None,
+            Video.mux_signed_playback_id != None,
+        ).all()
+        # detach from session — we'll open per-video sessions below
+        video_snapshot = [(v.vimeo_id, v.mux_asset_id, v.mux_signed_playback_id) for v in videos]
 
-    videos = db.query(Video).filter(
-        Video.mux_asset_id != None,
-        Video.mux_signed_playback_id != None,
-    ).all()
-
-    total = len(videos)
+    total = len(video_snapshot)
     log.info(f"[DRM Upgrade] Found {total} videos to process.")
     updated, skipped, failed = 0, 0, 0
-    results = []
 
-    for i, video in enumerate(videos, start=1):
-        log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {video.vimeo_id} | Asset: {video.mux_asset_id}")
+    for i, (vimeo_id, asset_id, signed_id) in enumerate(video_snapshot, start=1):
+        log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {vimeo_id} | Asset: {asset_id}")
         try:
             try:
-                asset = await asyncio.to_thread(get_asset, video.mux_asset_id)
+                asset = await asyncio.to_thread(get_asset, asset_id)
             except Exception as asset_err:
                 if "not_found" in str(asset_err).lower() or "Asset not found" in str(asset_err):
-                    log.warning(f"[DRM Upgrade] ⏭ Skipping {video.vimeo_id} — Mux asset {video.mux_asset_id} no longer exists")
+                    log.warning(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — Mux asset no longer exists")
                     skipped += 1
-                    results.append({"vimeo_id": video.vimeo_id, "status": "skipped", "reason": "mux asset not found"})
                     continue
                 raise
 
             existing_policies = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
 
-            if existing_policies.get(video.mux_signed_playback_id) == "drm":
-                log.info(f"[DRM Upgrade] ⏭ Skipping {video.vimeo_id} — already DRM")
+            if existing_policies.get(signed_id) == "drm":
+                log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — already DRM")
                 skipped += 1
-                results.append({"vimeo_id": video.vimeo_id, "status": "skipped", "reason": "already drm"})
                 continue
 
-            if video.mux_signed_playback_id in existing_policies:
-                log.info(f"[DRM Upgrade] Deleting old signed playback ID {video.mux_signed_playback_id}...")
-                await asyncio.to_thread(delete_playback_id, video.mux_asset_id, video.mux_signed_playback_id)
+            if signed_id in existing_policies:
+                log.info(f"[DRM Upgrade] Deleting old signed playback ID {signed_id}...")
+                await asyncio.to_thread(delete_playback_id, asset_id, signed_id)
 
-            new_drm_id = await asyncio.to_thread(add_signed_playback_id, video.mux_asset_id)
-            video.mux_signed_playback_id = new_drm_id
-            db.commit()
+            new_drm_id = await asyncio.to_thread(add_signed_playback_id, asset_id)
+            with SessionLocal() as db:
+                from app.database.models import Video
+                video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+                if video:
+                    video.mux_signed_playback_id = new_drm_id
+                    db.commit()
             updated += 1
-            log.info(f"[DRM Upgrade] ✅ {video.vimeo_id} upgraded → {new_drm_id}")
-            results.append({"vimeo_id": video.vimeo_id, "status": "upgraded", "drm_playback_id": new_drm_id})
+            log.info(f"[DRM Upgrade] ✅ {vimeo_id} upgraded → {new_drm_id}")
 
         except Exception as e:
             failed += 1
-            db.rollback()
-            log.error(f"[DRM Upgrade] ❌ Failed for {video.vimeo_id}: {str(e)}")
-            results.append({"vimeo_id": video.vimeo_id, "status": "failed", "error": str(e)})
+            log.error(f"[DRM Upgrade] ❌ Failed for {vimeo_id}: {str(e)}")
 
     log.info(f"[DRM Upgrade] Done. Total: {total} | Upgraded: {updated} | Skipped: {skipped} | Failed: {failed}")
 
+
+@router.post("/upgrade-to-drm")
+async def upgrade_playback_ids_to_drm(background_tasks: BackgroundTasks):
+    """
+    Queues a background DRM upgrade for all migrated videos.
+    Returns immediately — check app.log for progress.
+    Safe to re-run — skips videos already on DRM playback IDs.
+    """
+    if not DRM_CONFIGURATION_ID:
+        raise HTTPException(status_code=400, detail="DRM_CONFIGURATION_ID is not configured on this server.")
+
+    with SessionLocal() as db:
+        from app.database.models import Video
+        total = db.query(Video).filter(
+            Video.mux_asset_id != None,
+            Video.mux_signed_playback_id != None,
+        ).count()
+
+    background_tasks.add_task(_run_drm_upgrade)
     return {
-        "total": len(videos),
-        "upgraded": updated,
-        "skipped": skipped,
-        "failed": failed,
-        "results": results,
+        "status": "queued",
+        "message": f"DRM upgrade started in background for {total} videos. Monitor app.log for progress.",
+        "total_queued": total,
     }
 
 
