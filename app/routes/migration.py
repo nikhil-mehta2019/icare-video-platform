@@ -416,44 +416,41 @@ async def _run_drm_upgrade():
     for i, (vimeo_id, asset_id, stored_signed_id) in enumerate(video_snapshot, start=1):
         log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {vimeo_id} | Asset: {asset_id} | Signed: {stored_signed_id}")
         try:
-            try:
-                asset = await asyncio.to_thread(get_asset, asset_id)
-            except Exception as asset_err:
-                if "not_found" in str(asset_err).lower() or "Asset not found" in str(asset_err):
-                    log.warning(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — Mux asset no longer exists")
-                    skipped += 1
-                    continue
-                raise
-
-            existing_policies = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
-
-            # Skip if already has a DRM playback ID stored in DB
-            if stored_signed_id and existing_policies.get(stored_signed_id) == "drm":
-                log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — signed_id is already DRM")
+            asset = await asyncio.to_thread(get_asset, asset_id)
+        except Exception as asset_err:
+            if "not_found" in str(asset_err).lower() or "Asset not found" in str(asset_err):
+                log.warning(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — Mux asset no longer exists")
                 skipped += 1
-                continue
-
-            # Skip if mux_drm_playback_id already set and valid on Mux
-            # (re-run safety: check via stored snapshot won't work, so we check existing_policies)
-            already_drm = any(pol == "drm" for pol in existing_policies.values())
-            if already_drm:
-                log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — asset already has a DRM playback ID")
-                skipped += 1
-                continue
-
-            try:
-                new_id, policy_type = await asyncio.to_thread(add_signed_playback_id, asset_id)
-                with SessionLocal() as db:
-                    from app.database.models import Video
-                    video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
-                    if video:
-                        video.mux_drm_playback_id = new_id
-                        db.commit()
-                updated += 1
-                log.info(f"[DRM Upgrade] ✅ {vimeo_id} → {new_id} ({policy_type})")
-            except Exception as e:
+            else:
                 failed += 1
-                log.error(f"[DRM Upgrade] ❌ Failed for {vimeo_id}: {str(e)}")
+                log.error(f"[DRM Upgrade] ❌ Failed to fetch asset {vimeo_id}: {asset_err}")
+            continue
+
+        existing_policies = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
+
+        if stored_signed_id and existing_policies.get(stored_signed_id) == "drm":
+            log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — signed_id is already DRM")
+            skipped += 1
+            continue
+
+        if any(pol == "drm" for pol in existing_policies.values()):
+            log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — asset already has a DRM playback ID")
+            skipped += 1
+            continue
+
+        try:
+            new_id, policy_type = await asyncio.to_thread(add_signed_playback_id, asset_id)
+            with SessionLocal() as db:
+                from app.database.models import Video
+                video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+                if video:
+                    video.mux_drm_playback_id = new_id
+                    db.commit()
+            updated += 1
+            log.info(f"[DRM Upgrade] ✅ {vimeo_id} → {new_id} ({policy_type})")
+        except Exception as e:
+            failed += 1
+            log.error(f"[DRM Upgrade] ❌ Failed for {vimeo_id}: {str(e)}")
 
     log.info(f"[DRM Upgrade] Done. Total: {total} | Upgraded: {updated} | Skipped: {skipped} | Failed: {failed}")
 
