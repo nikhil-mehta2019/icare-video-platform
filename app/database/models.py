@@ -14,6 +14,7 @@ class Video(Base):
     mux_asset_id = Column(String(100), nullable=True)
     mux_playback_id = Column(String(100), nullable=True)          # Public — used for Wix iframe streaming
     mux_signed_playback_id = Column(String(100), nullable=True)   # Signed — used for mobile app downloads only
+    mux_drm_playback_id = Column(String(100), nullable=True)      # DRM — used for protected downloads/streaming
     mux_stream_url = Column(String(2000), nullable=True)
 
     captions_count = Column(Integer, default=0)

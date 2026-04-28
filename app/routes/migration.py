@@ -413,8 +413,8 @@ async def _run_drm_upgrade():
     log.info(f"[DRM Upgrade] Found {total} videos to process.")
     updated, skipped, failed = 0, 0, 0
 
-    for i, (vimeo_id, asset_id, signed_id) in enumerate(video_snapshot, start=1):
-        log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {vimeo_id} | Asset: {asset_id}")
+    for i, (vimeo_id, asset_id, stored_signed_id) in enumerate(video_snapshot, start=1):
+        log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {vimeo_id} | Asset: {asset_id} | Signed: {stored_signed_id}")
         try:
             try:
                 asset = await asyncio.to_thread(get_asset, asset_id)
@@ -427,24 +427,49 @@ async def _run_drm_upgrade():
 
             existing_policies = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
 
-            if existing_policies.get(signed_id) == "drm":
-                log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — already DRM")
+            # Skip if already has a DRM playback ID stored in DB
+            if stored_signed_id and existing_policies.get(stored_signed_id) == "drm":
+                log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — signed_id is already DRM")
                 skipped += 1
                 continue
 
-            if signed_id in existing_policies:
-                log.info(f"[DRM Upgrade] Deleting old signed playback ID {signed_id}...")
-                await asyncio.to_thread(delete_playback_id, asset_id, signed_id)
+            # Skip if mux_drm_playback_id already set and valid on Mux
+            # (re-run safety: check via stored snapshot won't work, so we check existing_policies)
+            already_drm = any(pol == "drm" for pol in existing_policies.values())
+            if already_drm:
+                log.info(f"[DRM Upgrade] ⏭ Skipping {vimeo_id} — asset already has a DRM playback ID")
+                skipped += 1
+                continue
 
-            new_drm_id = await asyncio.to_thread(add_signed_playback_id, asset_id)
-            with SessionLocal() as db:
-                from app.database.models import Video
-                video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
-                if video:
-                    video.mux_signed_playback_id = new_drm_id
-                    db.commit()
-            updated += 1
-            log.info(f"[DRM Upgrade] ✅ {vimeo_id} upgraded → {new_drm_id}")
+            try:
+                new_drm_id = await asyncio.to_thread(add_signed_playback_id, asset_id)
+                with SessionLocal() as db:
+                    from app.database.models import Video
+                    video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+                    if video:
+                        video.mux_drm_playback_id = new_drm_id
+                        db.commit()
+                updated += 1
+                log.info(f"[DRM Upgrade] ✅ {vimeo_id} upgraded → {new_drm_id}")
+            except Exception as drm_err:
+                log.error(f"[DRM Upgrade] ❌ DRM creation failed for {vimeo_id}: {drm_err}")
+                failed += 1
+
+                # Repair: if the signed playback ID is missing from Mux, re-add it
+                if stored_signed_id and stored_signed_id not in existing_policies:
+                    log.info(f"[DRM Upgrade] 🔧 Repairing missing signed ID for {vimeo_id}...")
+                    try:
+                        from app.services.mux_service import add_signed_playback_id as _add_signed
+                        new_signed_id = await asyncio.to_thread(_add_signed, asset_id)
+                        with SessionLocal() as db:
+                            from app.database.models import Video
+                            video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+                            if video:
+                                video.mux_signed_playback_id = new_signed_id
+                                db.commit()
+                        log.info(f"[DRM Upgrade] 🔧 Repaired signed ID for {vimeo_id} → {new_signed_id}")
+                    except Exception as repair_err:
+                        log.error(f"[DRM Upgrade] 🔧 Repair also failed for {vimeo_id}: {repair_err}")
 
         except Exception as e:
             failed += 1
@@ -474,6 +499,91 @@ async def upgrade_playback_ids_to_drm(background_tasks: BackgroundTasks):
     return {
         "status": "queued",
         "message": f"DRM upgrade started in background for {total} videos. Monitor app.log for progress.",
+        "total_queued": total,
+    }
+
+
+async def _run_repair_signed():
+    """
+    Re-adds a `signed` playback ID to every asset whose mux_signed_playback_id
+    no longer exists on Mux (deleted during a failed DRM upgrade attempt).
+    Safe to re-run — skips assets that already have a valid signed or DRM playback ID.
+    """
+    import logging
+    from app.database.models import Video
+    from app.services.mux_service import get_asset, add_signed_playback_id
+
+    log = logging.getLogger("repair_signed")
+    log.info("[Repair] Background repair task started.")
+
+    with SessionLocal() as db:
+        videos = db.query(Video).filter(Video.mux_asset_id != None).all()
+        snapshot = [(v.vimeo_id, v.mux_asset_id, v.mux_signed_playback_id) for v in videos]
+
+    total = len(snapshot)
+    repaired, skipped, failed = 0, 0, 0
+
+    for i, (vimeo_id, asset_id, stored_signed_id) in enumerate(snapshot, start=1):
+        log.info(f"[Repair] {i}/{total} — {vimeo_id} | asset {asset_id}")
+        try:
+            try:
+                asset = await asyncio.to_thread(get_asset, asset_id)
+            except Exception as e:
+                if "not_found" in str(e).lower():
+                    log.warning(f"[Repair] ⏭ {vimeo_id} — Mux asset gone, skipping")
+                    skipped += 1
+                    continue
+                raise
+
+            existing_ids = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
+
+            # Already has a valid signed or DRM playback ID on Mux — nothing to repair
+            if stored_signed_id and stored_signed_id in existing_ids:
+                log.info(f"[Repair] ⏭ {vimeo_id} — signed ID still valid on Mux, skipping")
+                skipped += 1
+                continue
+
+            # Check if any DRM playback ID already exists (upgrade succeeded before)
+            has_drm = any(pol == "drm" for pol in existing_ids.values())
+            if has_drm:
+                log.info(f"[Repair] ⏭ {vimeo_id} — already has DRM playback ID on Mux, skipping")
+                skipped += 1
+                continue
+
+            # Need to re-add a signed playback ID
+            log.info(f"[Repair] Adding signed playback ID for {vimeo_id}...")
+            new_signed_id = await asyncio.to_thread(add_signed_playback_id, asset_id)
+
+            with SessionLocal() as db:
+                video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+                if video:
+                    video.mux_signed_playback_id = new_signed_id
+                    db.commit()
+
+            repaired += 1
+            log.info(f"[Repair] ✅ {vimeo_id} repaired → {new_signed_id}")
+
+        except Exception as e:
+            failed += 1
+            log.error(f"[Repair] ❌ {vimeo_id}: {e}")
+
+    log.info(f"[Repair] Done. Total: {total} | Repaired: {repaired} | Skipped: {skipped} | Failed: {failed}")
+
+
+@router.post("/repair-signed-playback")
+async def repair_signed_playback(background_tasks: BackgroundTasks):
+    """
+    Re-adds signed playback IDs to any asset that lost its signed ID during
+    a failed DRM upgrade. Safe to call multiple times.
+    """
+    with SessionLocal() as db:
+        from app.database.models import Video
+        total = db.query(Video).filter(Video.mux_asset_id != None).count()
+
+    background_tasks.add_task(_run_repair_signed)
+    return {
+        "status": "queued",
+        "message": f"Repair started for up to {total} videos. Monitor app.log for progress.",
         "total_queued": total,
     }
 

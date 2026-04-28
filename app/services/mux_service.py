@@ -180,7 +180,8 @@ def add_public_playback_id(asset_id: str):
 def add_signed_playback_id(asset_id: str):
     """Adds a signed (or DRM) playback ID to an existing Mux asset — used for mobile downloads."""
     if DRM_CONFIGURATION_ID:
-        body = {"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}
+        # For existing assets, DRM requires advanced_playback_policy (not top-level policy field)
+        body = {"advanced_playback_policy": [{"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}]}
     else:
         body = {"policy": "signed"}
 

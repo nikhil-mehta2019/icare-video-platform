@@ -149,12 +149,15 @@ def get_download_url(
     video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found.")
-    if not video.mux_signed_playback_id:
+
+    # Prefer DRM playback ID if available, fall back to signed
+    download_playback_id = video.mux_drm_playback_id or video.mux_signed_playback_id
+    if not download_playback_id:
         raise HTTPException(status_code=400, detail="This video does not have a signed playback ID for downloads. Run the backfill endpoint first.")
 
     # 3. Generate download token and URL
-    token = generate_download_token(video.mux_signed_playback_id, expiration_hours=1)
-    download_url = f"https://stream.mux.com/{video.mux_signed_playback_id}/high.mp4?token={token}"
+    token = generate_download_token(download_playback_id, expiration_hours=1)
+    download_url = f"https://stream.mux.com/{download_playback_id}/high.mp4?token={token}"
 
     response = {
         "status": "success",
@@ -162,16 +165,16 @@ def get_download_url(
         "title": video.vimeo_title,
         "download_url": download_url,
         "token_expires_in_hours": 1,
-        "drm_enabled": bool(DRM_CONFIGURATION_ID),
+        "drm_enabled": bool(DRM_CONFIGURATION_ID and video.mux_drm_playback_id),
     }
 
     # DRM offline: provide a persistent license token the mobile app uses to fetch
     # a Widevine (Android) / FairPlay (iOS) offline license before going offline.
-    if DRM_CONFIGURATION_ID:
-        offline_token = generate_offline_license_token(video.mux_signed_playback_id, expiration_hours=48)
+    if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
+        offline_token = generate_offline_license_token(video.mux_drm_playback_id, expiration_hours=48)
         response["drm_offline_license_token"] = offline_token
-        response["drm_widevine_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_signed_playback_id}?token={offline_token}"
-        response["drm_fairplay_license_url"] = f"https://license.mux.com/license/fairplay/{video.mux_signed_playback_id}?token={offline_token}"
+        response["drm_widevine_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}"
+        response["drm_fairplay_license_url"] = f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}"
         response["drm_fairplay_cert_url"] = "https://license.mux.com/fairplay/cert"
 
     return response
