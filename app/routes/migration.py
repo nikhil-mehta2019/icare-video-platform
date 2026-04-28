@@ -451,10 +451,9 @@ async def _run_drm_upgrade():
                         db.commit()
                 updated += 1
                 log.info(f"[DRM Upgrade] ✅ {vimeo_id} → {new_id} ({policy_type})")
-
-        except Exception as e:
-            failed += 1
-            log.error(f"[DRM Upgrade] ❌ Failed for {vimeo_id}: {str(e)}")
+            except Exception as e:
+                failed += 1
+                log.error(f"[DRM Upgrade] ❌ Failed for {vimeo_id}: {str(e)}")
 
     log.info(f"[DRM Upgrade] Done. Total: {total} | Upgraded: {updated} | Skipped: {skipped} | Failed: {failed}")
 
