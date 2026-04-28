@@ -18,6 +18,9 @@ from typing import List
 
 router = APIRouter(prefix="/migration", tags=["Migration"])
 
+# In-memory progress tracking for background tasks
+_task_status = {}
+
 def get_db():
     db = SessionLocal()
     try:
@@ -406,15 +409,16 @@ async def _run_drm_upgrade():
             Video.mux_asset_id != None,
             Video.mux_signed_playback_id != None,
         ).all()
-        # detach from session — we'll open per-video sessions below
         video_snapshot = [(v.vimeo_id, v.mux_asset_id, v.mux_signed_playback_id) for v in videos]
 
     total = len(video_snapshot)
     log.info(f"[DRM Upgrade] Found {total} videos to process.")
     updated, skipped, failed = 0, 0, 0
+    _task_status["drm_upgrade"] = {"status": "running", "total": total, "updated": 0, "skipped": 0, "failed": 0, "current": 0}
 
     for i, (vimeo_id, asset_id, stored_signed_id) in enumerate(video_snapshot, start=1):
         log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {vimeo_id} | Asset: {asset_id} | Signed: {stored_signed_id}")
+        _task_status["drm_upgrade"]["current"] = i
         try:
             asset = await asyncio.to_thread(get_asset, asset_id)
         except Exception as asset_err:
@@ -447,11 +451,14 @@ async def _run_drm_upgrade():
                     video.mux_drm_playback_id = new_id
                     db.commit()
             updated += 1
+            _task_status["drm_upgrade"].update({"updated": updated, "skipped": skipped, "failed": failed})
             log.info(f"[DRM Upgrade] ✅ {vimeo_id} → {new_id} ({policy_type})")
         except Exception as e:
             failed += 1
+            _task_status["drm_upgrade"].update({"updated": updated, "skipped": skipped, "failed": failed})
             log.error(f"[DRM Upgrade] ❌ Failed for {vimeo_id}: {str(e)}")
 
+    _task_status["drm_upgrade"]["status"] = "done"
     log.info(f"[DRM Upgrade] Done. Total: {total} | Upgraded: {updated} | Skipped: {skipped} | Failed: {failed}")
 
 
@@ -499,9 +506,11 @@ async def _run_repair_signed():
 
     total = len(snapshot)
     repaired, skipped, failed = 0, 0, 0
+    _task_status["repair"] = {"status": "running", "total": total, "repaired": 0, "skipped": 0, "failed": 0, "current": 0}
 
     for i, (vimeo_id, asset_id, stored_signed_id) in enumerate(snapshot, start=1):
         log.info(f"[Repair] {i}/{total} — {vimeo_id} | asset {asset_id}")
+        _task_status["repair"]["current"] = i
         try:
             try:
                 asset = await asyncio.to_thread(get_asset, asset_id)
@@ -538,12 +547,15 @@ async def _run_repair_signed():
                     db.commit()
 
             repaired += 1
+            _task_status["repair"].update({"repaired": repaired, "skipped": skipped, "failed": failed})
             log.info(f"[Repair] ✅ {vimeo_id} repaired → {new_id} ({policy_type})")
 
         except Exception as e:
             failed += 1
+            _task_status["repair"].update({"repaired": repaired, "skipped": skipped, "failed": failed})
             log.error(f"[Repair] ❌ {vimeo_id}: {e}")
 
+    _task_status["repair"]["status"] = "done"
     log.info(f"[Repair] Done. Total: {total} | Repaired: {repaired} | Skipped: {skipped} | Failed: {failed}")
 
 
@@ -562,6 +574,15 @@ async def repair_signed_playback(background_tasks: BackgroundTasks):
         "status": "queued",
         "message": f"Repair started for up to {total} videos. Monitor app.log for progress.",
         "total_queued": total,
+    }
+
+
+@router.get("/task-status")
+def get_task_status():
+    """Returns live progress for the DRM upgrade and repair background tasks."""
+    return {
+        "drm_upgrade": _task_status.get("drm_upgrade", {"status": "not_started"}),
+        "repair": _task_status.get("repair", {"status": "not_started"}),
     }
 
 
