@@ -402,9 +402,15 @@ async def upgrade_playback_ids_to_drm(db: Session = Depends(get_db)):
       3. Updates mux_signed_playback_id in the DB
     Safe to re-run — skips videos that already have a DRM playback ID.
     """
+    import logging
     from app.database.models import Video
+    from app.services.mux_service import get_asset
+
+    log = logging.getLogger("drm_upgrade")
+    log.info("[DRM Upgrade] Starting upgrade-to-drm backfill...")
 
     if not DRM_CONFIGURATION_ID:
+        log.error("[DRM Upgrade] DRM_CONFIGURATION_ID is not set — aborting.")
         raise HTTPException(status_code=400, detail="DRM_CONFIGURATION_ID is not configured on this server.")
 
     videos = db.query(Video).filter(
@@ -412,36 +418,41 @@ async def upgrade_playback_ids_to_drm(db: Session = Depends(get_db)):
         Video.mux_signed_playback_id != None,
     ).all()
 
+    total = len(videos)
+    log.info(f"[DRM Upgrade] Found {total} videos to process.")
     updated, skipped, failed = 0, 0, 0
     results = []
 
-    for video in videos:
+    for i, video in enumerate(videos, start=1):
+        log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {video.vimeo_id} | Asset: {video.mux_asset_id}")
         try:
-            # Inspect existing playback IDs on the Mux asset
-            from app.services.mux_service import get_asset
             asset = await asyncio.to_thread(get_asset, video.mux_asset_id)
             existing_policies = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
 
             if existing_policies.get(video.mux_signed_playback_id) == "drm":
+                log.info(f"[DRM Upgrade] ⏭ Skipping {video.vimeo_id} — already DRM")
                 skipped += 1
                 results.append({"vimeo_id": video.vimeo_id, "status": "skipped", "reason": "already drm"})
                 continue
 
-            # Delete old signed playback ID if it still exists on Mux
             if video.mux_signed_playback_id in existing_policies:
+                log.info(f"[DRM Upgrade] Deleting old signed playback ID {video.mux_signed_playback_id}...")
                 await asyncio.to_thread(delete_playback_id, video.mux_asset_id, video.mux_signed_playback_id)
 
-            # Create new DRM playback ID (add_signed_playback_id uses drm policy when DRM_CONFIGURATION_ID is set)
             new_drm_id = await asyncio.to_thread(add_signed_playback_id, video.mux_asset_id)
             video.mux_signed_playback_id = new_drm_id
             db.commit()
             updated += 1
+            log.info(f"[DRM Upgrade] ✅ {video.vimeo_id} upgraded → {new_drm_id}")
             results.append({"vimeo_id": video.vimeo_id, "status": "upgraded", "drm_playback_id": new_drm_id})
 
         except Exception as e:
             failed += 1
             db.rollback()
+            log.error(f"[DRM Upgrade] ❌ Failed for {video.vimeo_id}: {str(e)}")
             results.append({"vimeo_id": video.vimeo_id, "status": "failed", "error": str(e)})
+
+    log.info(f"[DRM Upgrade] Done. Total: {total} | Upgraded: {updated} | Skipped: {skipped} | Failed: {failed}")
 
     return {
         "total": len(videos),
