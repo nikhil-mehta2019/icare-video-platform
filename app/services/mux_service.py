@@ -178,21 +178,29 @@ def add_public_playback_id(asset_id: str):
     return response.json()["data"]["id"]
 
 def add_signed_playback_id(asset_id: str):
-    """Adds a signed (or DRM) playback ID to an existing Mux asset — used for mobile downloads."""
+    """Adds a DRM playback ID if DRM is configured, falling back to signed on failure."""
     if DRM_CONFIGURATION_ID:
         # For existing assets, DRM requires advanced_playback_policy (not top-level policy field)
-        body = {"advanced_playback_policy": [{"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}]}
-    else:
-        body = {"policy": "signed"}
+        drm_body = {"advanced_playback_policy": [{"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}]}
+        response = requests.post(
+            f"{BASE_URL}/assets/{asset_id}/playback-ids",
+            json=drm_body,
+            auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
+        )
+        if response.ok:
+            return response.json()["data"]["id"], "drm"
+        # DRM rejected (account not onboarded or invalid config) — fall through to signed
+        logger.warning(f"[Mux Service] DRM playback ID failed for {asset_id} ({response.status_code}), falling back to signed: {response.text}")
 
+    # Plain signed fallback
     response = requests.post(
         f"{BASE_URL}/assets/{asset_id}/playback-ids",
-        json=body,
+        json={"policy": "signed"},
         auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
     )
     if not response.ok:
         raise Exception(f"Mux API Error ({response.status_code}): {response.text}")
-    return response.json()["data"]["id"]
+    return response.json()["data"]["id"], "signed"
 
 def generate_drm_license_token(playback_id: str, expiration_hours: int = 6) -> str:
     """

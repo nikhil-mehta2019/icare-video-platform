@@ -194,11 +194,14 @@ async def backfill_signed_playback_ids(db: Session = Depends(get_db)):
 
     for video in videos:
         try:
-            signed_id = await asyncio.to_thread(add_signed_playback_id, video.mux_asset_id)
-            video.mux_signed_playback_id = signed_id
+            new_id, policy_type = await asyncio.to_thread(add_signed_playback_id, video.mux_asset_id)
+            if policy_type == "drm":
+                video.mux_drm_playback_id = new_id
+            else:
+                video.mux_signed_playback_id = new_id
             db.commit()
             updated += 1
-            results.append({"vimeo_id": video.vimeo_id, "status": "updated", "signed_playback_id": signed_id})
+            results.append({"vimeo_id": video.vimeo_id, "status": "updated", "playback_id": new_id, "policy": policy_type})
         except Exception as e:
             failed += 1
             results.append({"vimeo_id": video.vimeo_id, "status": "failed", "error": str(e)})
@@ -442,34 +445,18 @@ async def _run_drm_upgrade():
                 continue
 
             try:
-                new_drm_id = await asyncio.to_thread(add_signed_playback_id, asset_id)
+                new_id, policy_type = await asyncio.to_thread(add_signed_playback_id, asset_id)
                 with SessionLocal() as db:
                     from app.database.models import Video
                     video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
                     if video:
-                        video.mux_drm_playback_id = new_drm_id
+                        if policy_type == "drm":
+                            video.mux_drm_playback_id = new_id
+                        else:
+                            video.mux_signed_playback_id = new_id
                         db.commit()
                 updated += 1
-                log.info(f"[DRM Upgrade] ✅ {vimeo_id} upgraded → {new_drm_id}")
-            except Exception as drm_err:
-                log.error(f"[DRM Upgrade] ❌ DRM creation failed for {vimeo_id}: {drm_err}")
-                failed += 1
-
-                # Repair: if the signed playback ID is missing from Mux, re-add it
-                if stored_signed_id and stored_signed_id not in existing_policies:
-                    log.info(f"[DRM Upgrade] 🔧 Repairing missing signed ID for {vimeo_id}...")
-                    try:
-                        from app.services.mux_service import add_signed_playback_id as _add_signed
-                        new_signed_id = await asyncio.to_thread(_add_signed, asset_id)
-                        with SessionLocal() as db:
-                            from app.database.models import Video
-                            video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
-                            if video:
-                                video.mux_signed_playback_id = new_signed_id
-                                db.commit()
-                        log.info(f"[DRM Upgrade] 🔧 Repaired signed ID for {vimeo_id} → {new_signed_id}")
-                    except Exception as repair_err:
-                        log.error(f"[DRM Upgrade] 🔧 Repair also failed for {vimeo_id}: {repair_err}")
+                log.info(f"[DRM Upgrade] ✅ {vimeo_id} → {new_id} ({policy_type})")
 
         except Exception as e:
             failed += 1
@@ -552,16 +539,19 @@ async def _run_repair_signed():
 
             # Need to re-add a signed playback ID
             log.info(f"[Repair] Adding signed playback ID for {vimeo_id}...")
-            new_signed_id = await asyncio.to_thread(add_signed_playback_id, asset_id)
+            new_id, policy_type = await asyncio.to_thread(add_signed_playback_id, asset_id)
 
             with SessionLocal() as db:
                 video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
                 if video:
-                    video.mux_signed_playback_id = new_signed_id
+                    if policy_type == "drm":
+                        video.mux_drm_playback_id = new_id
+                    else:
+                        video.mux_signed_playback_id = new_id
                     db.commit()
 
             repaired += 1
-            log.info(f"[Repair] ✅ {vimeo_id} repaired → {new_signed_id}")
+            log.info(f"[Repair] ✅ {vimeo_id} repaired → {new_id} ({policy_type})")
 
         except Exception as e:
             failed += 1
