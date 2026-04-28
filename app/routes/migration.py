@@ -195,10 +195,7 @@ async def backfill_signed_playback_ids(db: Session = Depends(get_db)):
     for video in videos:
         try:
             new_id, policy_type = await asyncio.to_thread(add_signed_playback_id, video.mux_asset_id)
-            if policy_type == "drm":
-                video.mux_drm_playback_id = new_id
-            else:
-                video.mux_signed_playback_id = new_id
+            video.mux_drm_playback_id = new_id
             db.commit()
             updated += 1
             results.append({"vimeo_id": video.vimeo_id, "status": "updated", "playback_id": new_id, "policy": policy_type})
@@ -450,10 +447,7 @@ async def _run_drm_upgrade():
                     from app.database.models import Video
                     video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
                     if video:
-                        if policy_type == "drm":
-                            video.mux_drm_playback_id = new_id
-                        else:
-                            video.mux_signed_playback_id = new_id
+                        video.mux_drm_playback_id = new_id
                         db.commit()
                 updated += 1
                 log.info(f"[DRM Upgrade] ✅ {vimeo_id} → {new_id} ({policy_type})")
@@ -544,10 +538,7 @@ async def _run_repair_signed():
             with SessionLocal() as db:
                 video = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
                 if video:
-                    if policy_type == "drm":
-                        video.mux_drm_playback_id = new_id
-                    else:
-                        video.mux_signed_playback_id = new_id
+                    video.mux_drm_playback_id = new_id
                     db.commit()
 
             repaired += 1
