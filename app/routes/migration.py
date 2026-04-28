@@ -426,7 +426,16 @@ async def upgrade_playback_ids_to_drm(db: Session = Depends(get_db)):
     for i, video in enumerate(videos, start=1):
         log.info(f"[DRM Upgrade] {i}/{total} — Vimeo ID: {video.vimeo_id} | Asset: {video.mux_asset_id}")
         try:
-            asset = await asyncio.to_thread(get_asset, video.mux_asset_id)
+            try:
+                asset = await asyncio.to_thread(get_asset, video.mux_asset_id)
+            except Exception as asset_err:
+                if "not_found" in str(asset_err).lower() or "Asset not found" in str(asset_err):
+                    log.warning(f"[DRM Upgrade] ⏭ Skipping {video.vimeo_id} — Mux asset {video.mux_asset_id} no longer exists")
+                    skipped += 1
+                    results.append({"vimeo_id": video.vimeo_id, "status": "skipped", "reason": "mux asset not found"})
+                    continue
+                raise
+
             existing_policies = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
 
             if existing_policies.get(video.mux_signed_playback_id) == "drm":
