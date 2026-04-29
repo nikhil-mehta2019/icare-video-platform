@@ -15,7 +15,8 @@ if not DATABASE_URL:
     raise ValueError("FATAL: DATABASE_URL environment variable is not set")
 
 JWT_SECRET = os.getenv("JWT_SECRET", "icare-secret")
-BASE44_PUBLIC_KEY = os.getenv("BASE44_PUBLIC_KEY")  # PEM-encoded RS256 public key from Base44
+BASE44_PUBLIC_KEY = os.getenv("BASE44_PUBLIC_KEY")
+API_KEY = os.getenv("API_KEY")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "http://35.154.164.178:8000")
 VIMEO_ACCESS_TOKEN = os.getenv("VIMEO_ACCESS_TOKEN")
 
