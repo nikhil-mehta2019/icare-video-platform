@@ -180,8 +180,7 @@ def add_public_playback_id(asset_id: str):
 def add_signed_playback_id(asset_id: str):
     """Adds a DRM playback ID if DRM is configured, falling back to signed on failure."""
     if DRM_CONFIGURATION_ID:
-        # For existing assets, DRM requires advanced_playback_policy (not top-level policy field)
-        drm_body = {"advanced_playback_policy": [{"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}]}
+        drm_body = {"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}
         response = requests.post(
             f"{BASE_URL}/assets/{asset_id}/playback-ids",
             json=drm_body,

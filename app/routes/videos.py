@@ -87,6 +87,86 @@ def get_secure_playback_data(
     return response
 
 
+@router.get("/by-mux-id/{mux_playback_id}/play")
+def get_secure_playback_data_by_mux_id(
+    mux_playback_id: str,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key)
+):
+    video = db.query(Video).filter(Video.mux_playback_id == mux_playback_id).first()
+
+    if not video:
+        # also check signed playback id
+        video = db.query(Video).filter(Video.mux_signed_playback_id == mux_playback_id).first()
+
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found for this Mux playback ID.")
+    if not video.mux_signed_playback_id:
+        raise HTTPException(status_code=400, detail="Video does not have a signed playback ID.")
+
+    expiration_hours = 6
+    secure_token = generate_playback_token(video.mux_signed_playback_id, expiration_hours=expiration_hours)
+    secure_stream_url = f"https://stream.mux.com/{video.mux_signed_playback_id}.m3u8?token={secure_token}"
+
+    response = {
+        "status": "success",
+        "vimeo_id": video.vimeo_id,
+        "title": video.vimeo_title or "Untitled Video",
+        "playback_id": video.mux_signed_playback_id,
+        "secure_stream_url": secure_stream_url,
+        "playback_token": secure_token,
+        "token_expires_in_hours": expiration_hours,
+        "drm_enabled": bool(DRM_CONFIGURATION_ID),
+    }
+
+    if DRM_CONFIGURATION_ID:
+        license_token = generate_drm_license_token(video.mux_signed_playback_id, expiration_hours=expiration_hours)
+        response["drm_license_token"] = license_token
+        response["drm_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_signed_playback_id}?token={license_token}"
+
+    return response
+
+
+@router.get("/by-mux-id/{mux_playback_id}/download")
+def get_download_url_by_mux_id(
+    mux_playback_id: str,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key)
+):
+    video = db.query(Video).filter(Video.mux_playback_id == mux_playback_id).first()
+
+    if not video:
+        video = db.query(Video).filter(Video.mux_signed_playback_id == mux_playback_id).first()
+
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found for this Mux playback ID.")
+
+    download_playback_id = video.mux_drm_playback_id or video.mux_signed_playback_id
+    if not download_playback_id:
+        raise HTTPException(status_code=400, detail="This video does not have a signed playback ID for downloads.")
+
+    token = generate_download_token(download_playback_id, expiration_hours=1)
+    download_url = f"https://stream.mux.com/{download_playback_id}/high.mp4?token={token}"
+
+    response = {
+        "status": "success",
+        "vimeo_id": video.vimeo_id,
+        "title": video.vimeo_title,
+        "download_url": download_url,
+        "token_expires_in_hours": 1,
+        "drm_enabled": bool(DRM_CONFIGURATION_ID and video.mux_drm_playback_id),
+    }
+
+    if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
+        offline_token = generate_offline_license_token(video.mux_drm_playback_id, expiration_hours=48)
+        response["drm_offline_license_token"] = offline_token
+        response["drm_widevine_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}"
+        response["drm_fairplay_license_url"] = f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}"
+        response["drm_fairplay_cert_url"] = "https://license.mux.com/fairplay/cert"
+
+    return response
+
+
 @router.get("/{vimeo_id}/download")
 def get_download_url(
     vimeo_id: str,
