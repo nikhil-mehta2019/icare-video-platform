@@ -463,10 +463,10 @@ async def _run_drm_upgrade():
 
 
 @router.post("/upgrade-to-drm")
-async def upgrade_playback_ids_to_drm(background_tasks: BackgroundTasks):
+async def upgrade_playback_ids_to_drm():
     """
     Queues a background DRM upgrade for all migrated videos.
-    Returns immediately — check app.log for progress.
+    Returns immediately — check /migration/task-status for progress.
     Safe to re-run — skips videos already on DRM playback IDs.
     """
     if not DRM_CONFIGURATION_ID:
@@ -479,10 +479,10 @@ async def upgrade_playback_ids_to_drm(background_tasks: BackgroundTasks):
             Video.mux_signed_playback_id != None,
         ).count()
 
-    background_tasks.add_task(_run_drm_upgrade)
+    asyncio.create_task(_run_drm_upgrade())
     return {
         "status": "queued",
-        "message": f"DRM upgrade started in background for {total} videos. Monitor app.log for progress.",
+        "message": f"DRM upgrade started in background for {total} videos. Poll /migration/task-status for progress.",
         "total_queued": total,
     }
 
@@ -560,7 +560,7 @@ async def _run_repair_signed():
 
 
 @router.post("/repair-signed-playback")
-async def repair_signed_playback(background_tasks: BackgroundTasks):
+async def repair_signed_playback():
     """
     Re-adds signed playback IDs to any asset that lost its signed ID during
     a failed DRM upgrade. Safe to call multiple times.
@@ -569,10 +569,10 @@ async def repair_signed_playback(background_tasks: BackgroundTasks):
         from app.database.models import Video
         total = db.query(Video).filter(Video.mux_asset_id != None).count()
 
-    background_tasks.add_task(_run_repair_signed)
+    asyncio.create_task(_run_repair_signed())
     return {
         "status": "queued",
-        "message": f"Repair started for up to {total} videos. Monitor app.log for progress.",
+        "message": f"Repair started for up to {total} videos. Poll /migration/task-status for progress.",
         "total_queued": total,
     }
 
