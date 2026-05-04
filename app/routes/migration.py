@@ -274,8 +274,9 @@ async def attach_audio(vimeo_id: str, background_tasks: BackgroundTasks, db: Ses
 
 @router.post("/folder-migration")
 async def start_folder_migration(
-    folder_url: str, 
-    limit: Optional[int] = None, 
+    folder_url: str,
+    limit: Optional[int] = None,
+    title_suffix: Optional[str] = None,
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db)
 ):
@@ -294,9 +295,43 @@ async def start_folder_migration(
     db.commit()
     db.refresh(job)
 
-    background_tasks.add_task(run_folder_migration, job.id, folder_id, limit)
+    background_tasks.add_task(run_folder_migration, job.id, folder_url, limit, title_suffix)
 
-    return {"status": "Folder migration started", "job_id": job.id, "folder_id": folder_id}
+    return {"status": "Folder migration started", "job_id": job.id, "folder_id": folder_id, "title_suffix": title_suffix}
+
+
+@router.delete("/cleanup-old")
+async def cleanup_old_videos(suffix: str, db: Session = Depends(get_db)):
+    """
+    Deletes all Mux assets and DB records for videos whose title does NOT end with `suffix`.
+    Use after re-migrating with a new suffix (e.g. _052026) to remove the old batch.
+    Example: DELETE /migration/cleanup-old?suffix=_052026
+    """
+    from app.database.models import Video
+
+    old_videos = db.query(Video).filter(~Video.vimeo_title.like(f"%{suffix}")).all()
+
+    if not old_videos:
+        return {"status": "nothing_to_delete", "deleted": 0, "failed": 0}
+
+    deleted, failed = 0, 0
+    results = []
+
+    for video in old_videos:
+        if video.mux_asset_id:
+            try:
+                await asyncio.to_thread(delete_asset, video.mux_asset_id)
+            except Exception as e:
+                failed += 1
+                results.append({"vimeo_id": video.vimeo_id, "status": "failed", "error": str(e)})
+                continue
+
+        db.delete(video)
+        db.commit()
+        deleted += 1
+        results.append({"vimeo_id": video.vimeo_id, "title": video.vimeo_title, "status": "deleted"})
+
+    return {"deleted": deleted, "failed": failed, "results": results}
 
 
 @router.post("/migrate-ids")

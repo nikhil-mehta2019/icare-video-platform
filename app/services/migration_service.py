@@ -33,9 +33,10 @@ def _get_job_logger(job_id: int) -> logging.Logger:
     job_logger.setLevel(logging.INFO)
     return job_logger
 
-def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folder_name=None):
-    logger.info(f"[Migration Worker] Starting processing for Vimeo ID: {vimeo_id} ({title})")
-    
+def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folder_name=None, title_suffix=None):
+    effective_title = f"{title}{title_suffix}" if title_suffix else title
+    logger.info(f"[Migration Worker] Starting processing for Vimeo ID: {vimeo_id} ({effective_title})")
+
     logger.info(f"[Migration Worker] Checking if {vimeo_id} already exists in database...")
     existing = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
     if existing:
@@ -56,7 +57,7 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folde
         logger.info(f"[Migration Worker] Step 1: Uploading video + captions to Mux...")
         mux_data = upload_video(
             video_url=download_url,
-            title=title,
+            title=effective_title,
             captions=captions,
             audio_tracks=[],
             folder_name=folder_name,
@@ -79,7 +80,7 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folde
         logger.info(f"[Migration Worker] Step 2: Saving record immediately with status='processing'...")
         video = Video(
             vimeo_id=vimeo_id,
-            vimeo_title=title,
+            vimeo_title=effective_title,
             vimeo_url=vimeo_url,
             vimeo_folder_path=folder_path,
             mux_asset_id=mux_asset_id,
@@ -212,7 +213,7 @@ async def run_bulk_migration(job_id: int, limit: int = None, folder_id: str = No
         db.close()
 
 
-async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
+async def run_folder_migration(job_id: int, folder_url: str, limit: int = None, title_suffix: str = None):
     jlog = _get_job_logger(job_id)
     jlog.info(f"[Folder Migration] Starting Job ID: {job_id} | folder: {folder_url}")
     try:
@@ -250,7 +251,7 @@ async def run_folder_migration(job_id: int, folder_url: str, limit: int = None):
             with SessionLocal() as db:
                 try:
                     await asyncio.to_thread(
-                        process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name
+                        process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name, title_suffix
                     )
                     imported += 1
                 except Exception as e:
