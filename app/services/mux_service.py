@@ -53,7 +53,7 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None, 
             "advanced_playback_policies": [
                 {"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}
             ],
-            "video_quality": "plus",
+            "video_quality": "premium",
             "meta": {"title": safe_title},
             "passthrough": folder_name[:255] if folder_name else "",
         }
@@ -62,7 +62,7 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None, 
         payload = {
             "input": inputs,
             "playback_policy": ["public"],
-            "video_quality": "plus",
+            "video_quality": "premium",
             "meta": {"title": safe_title},
             "passthrough": folder_name[:255] if folder_name else "",
         }
