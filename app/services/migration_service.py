@@ -8,7 +8,7 @@ from app.services.vimeo_service import (
     get_video_download_url, extract_folder_path,
     get_video_captions, get_video_audio_tracks, get_vimeo_page, get_video_metadata
 )
-from app.services.mux_service import upload_video, add_signed_playback_id, wait_for_asset_ready, add_audio_track
+from app.services.mux_service import upload_video, wait_for_asset_ready, add_audio_track
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:\t  %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,15 +64,15 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folde
 
         mux_asset_id = mux_data["asset_id"]
         mux_playback_id = mux_data["playback_id"]
+        # DRM playback ID is created at asset-creation time when DRM is configured.
+        # No need to call add_signed_playback_id separately.
+        drm_playback_id = mux_data.get("drm_playback_id")
         mux_stream_url = f"https://stream.mux.com/{mux_playback_id}.m3u8"
 
-        # Create signed playback ID immediately — doesn't require asset to be ready
-        try:
-            signed_playback_id = add_signed_playback_id(mux_asset_id)
-            logger.info(f"[Migration Worker] ✅ Signed playback ID created: {signed_playback_id}")
-        except Exception as e:
-            logger.warning(f"[Migration Worker] ⚠️ Could not create signed playback ID for {vimeo_id}: {str(e)}")
-            signed_playback_id = None
+        if drm_playback_id:
+            logger.info(f"[Migration Worker] ✅ DRM playback ID from upload: {drm_playback_id}")
+        else:
+            logger.info(f"[Migration Worker] ℹ️ No DRM playback ID — asset created without DRM.")
 
         # --- STEP 2: Save to DB immediately so webhooks can find and update this record ---
         # Status is "processing" — webhook will update it to "ready" when Mux finishes encoding.
@@ -84,7 +84,8 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folde
             vimeo_folder_path=folder_path,
             mux_asset_id=mux_asset_id,
             mux_playback_id=mux_playback_id,
-            mux_signed_playback_id=signed_playback_id,
+            mux_signed_playback_id=drm_playback_id,
+            mux_drm_playback_id=drm_playback_id,
             mux_stream_url=mux_stream_url,
             captions_count=cap_count,
             captions_languages=cap_langs,

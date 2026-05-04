@@ -22,6 +22,9 @@ class Video(Base):
     audio_tracks_count = Column(Integer, default=0)
     audio_languages = Column(String(500), nullable=True)
 
+    video_quality = Column(String(50), nullable=True)   # "plus", "premium" etc from Mux
+    drm_compatible = Column(Boolean, default=False)     # True if premium quality (DRM capable)
+
     status = Column(String(50), default="pending")  # "pending", "ready", "errored"
     created_at = Column(DateTime, default=datetime.utcnow)
 

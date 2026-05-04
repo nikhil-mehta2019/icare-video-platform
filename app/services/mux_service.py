@@ -44,22 +44,28 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None, 
 
     safe_title = title[:250] if title else "Untitled"
 
-    # DRM: if a configuration ID is set, protect the asset and use a drm playback policy.
+    # DRM requires `advanced_playback_policies` (not `playback_policy`) and video_quality "plus" or "premium".
     # Without DRM_CONFIGURATION_ID the asset is created as public (development / non-DRM env).
     if DRM_CONFIGURATION_ID:
-        playback_policy = [{"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}]
         logger.info(f"[Mux Service] DRM enabled — using configuration {DRM_CONFIGURATION_ID}")
+        payload = {
+            "input": inputs,
+            "advanced_playback_policies": [
+                {"policy": "drm", "drm_configuration_id": DRM_CONFIGURATION_ID}
+            ],
+            "video_quality": "plus",
+            "meta": {"title": safe_title},
+            "passthrough": folder_name[:255] if folder_name else "",
+        }
     else:
-        playback_policy = ["public"]
         logger.info("[Mux Service] DRM not configured — using public playback policy")
-
-    payload = {
-        "input": inputs,
-        "playback_policy": playback_policy,
-        "encoding_tier": "smart",
-        "meta": {"title": safe_title},
-        "passthrough": folder_name[:255] if folder_name else "",
-    }
+        payload = {
+            "input": inputs,
+            "playback_policy": ["public"],
+            "video_quality": "plus",
+            "meta": {"title": safe_title},
+            "passthrough": folder_name[:255] if folder_name else "",
+        }
 
     logger.info(f"[Mux Service] Dispatching POST request to Mux API...")
     response = requests.post(
@@ -76,9 +82,14 @@ def upload_video(video_url, title="Untitled", captions=None, audio_tracks=None, 
     data = response.json()["data"]
     logger.info(f"[Mux Service] ✅ Mux asset created successfully. Asset ID: {data['id']}")
 
+    playback_ids = data.get("playback_ids", [])
+    drm_playback_id = next((p["id"] for p in playback_ids if p.get("policy") == "drm"), None)
+    first_playback_id = playback_ids[0]["id"] if playback_ids else None
+
     return {
         "asset_id": data["id"],
-        "playback_id": data["playback_ids"][0]["id"]
+        "playback_id": first_playback_id,
+        "drm_playback_id": drm_playback_id,
     }
 
 def get_asset(asset_id: str):
