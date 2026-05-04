@@ -77,39 +77,29 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folde
 
         # --- STEP 2: Save to DB immediately so webhooks can find and update this record ---
         # Status is "processing" — webhook will update it to "ready" when Mux finishes encoding.
-        # When re-migrating with a suffix, update the existing record in-place to preserve FK references.
+        # When re-migrating with a suffix, delete the old record first so we insert a clean new one.
         logger.info(f"[Migration Worker] Step 2: Saving record immediately with status='processing'...")
         if existing:
-            logger.info(f"[Migration Worker] Updating existing record for {vimeo_id} (re-migration with suffix).")
-            existing.vimeo_title = effective_title
-            existing.mux_asset_id = mux_asset_id
-            existing.mux_playback_id = mux_playback_id
-            existing.mux_signed_playback_id = drm_playback_id
-            existing.mux_drm_playback_id = drm_playback_id
-            existing.mux_stream_url = mux_stream_url
-            existing.captions_count = cap_count
-            existing.captions_languages = cap_langs
-            existing.audio_tracks_count = 0
-            existing.audio_languages = None
-            existing.status = "processing"
-        else:
-            video = Video(
-                vimeo_id=vimeo_id,
-                vimeo_title=effective_title,
-                vimeo_url=vimeo_url,
-                vimeo_folder_path=folder_path,
-                mux_asset_id=mux_asset_id,
-                mux_playback_id=mux_playback_id,
-                mux_signed_playback_id=drm_playback_id,
-                mux_drm_playback_id=drm_playback_id,
-                mux_stream_url=mux_stream_url,
-                captions_count=cap_count,
-                captions_languages=cap_langs,
-                audio_tracks_count=0,
-                audio_languages=None,
-                status="processing"
-            )
-            db.add(video)
+            logger.info(f"[Migration Worker] Deleting old record for {vimeo_id} before re-inserting (re-migration with suffix).")
+            db.delete(existing)
+            db.flush()
+        video = Video(
+            vimeo_id=vimeo_id,
+            vimeo_title=effective_title,
+            vimeo_url=vimeo_url,
+            vimeo_folder_path=folder_path,
+            mux_asset_id=mux_asset_id,
+            mux_playback_id=mux_playback_id,
+            mux_signed_playback_id=drm_playback_id,
+            mux_drm_playback_id=drm_playback_id,
+            mux_stream_url=mux_stream_url,
+            captions_count=cap_count,
+            captions_languages=cap_langs,
+            audio_tracks_count=0,
+            audio_languages=None,
+            status="processing"
+        )
+        db.add(video)
         db.commit()
         logger.info(f"[Migration Worker] ✅ Record saved. Mux webhook will update status when encoding completes.")
 
