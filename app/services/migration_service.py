@@ -35,12 +35,13 @@ def _get_job_logger(job_id: int) -> logging.Logger:
 
 def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folder_name=None, title_suffix=None):
     effective_title = f"{title}{title_suffix}" if title_suffix else title
-    logger.info(f"[Migration Worker] Starting processing for Vimeo ID: {vimeo_id} ({effective_title})")
+    effective_vimeo_id = f"{vimeo_id}{title_suffix}" if title_suffix else vimeo_id
+    logger.info(f"[Migration Worker] Starting processing for Vimeo ID: {effective_vimeo_id} ({effective_title})")
 
-    logger.info(f"[Migration Worker] Checking if {vimeo_id} already exists in database...")
-    existing = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
-    if existing and not title_suffix:
-        logger.info(f"[Migration Worker] Video {vimeo_id} already exists. Skipping.")
+    logger.info(f"[Migration Worker] Checking if {effective_vimeo_id} already exists in database...")
+    existing = db.query(Video).filter(Video.vimeo_id == effective_vimeo_id).first()
+    if existing:
+        logger.info(f"[Migration Worker] Video {effective_vimeo_id} already exists. Skipping.")
         return {"status": "skipped"}
 
     try:
@@ -77,14 +78,9 @@ def process_single_video(db, title, vimeo_url, vimeo_id, folder_path=None, folde
 
         # --- STEP 2: Save to DB immediately so webhooks can find and update this record ---
         # Status is "processing" — webhook will update it to "ready" when Mux finishes encoding.
-        # When re-migrating with a suffix, delete the old record first so we insert a clean new one.
         logger.info(f"[Migration Worker] Step 2: Saving record immediately with status='processing'...")
-        if existing:
-            logger.info(f"[Migration Worker] Deleting old record for {vimeo_id} before re-inserting (re-migration with suffix).")
-            db.delete(existing)
-            db.flush()
         video = Video(
-            vimeo_id=vimeo_id,
+            vimeo_id=effective_vimeo_id,
             vimeo_title=effective_title,
             vimeo_url=vimeo_url,
             vimeo_folder_path=folder_path,
@@ -231,12 +227,11 @@ async def run_folder_migration(job_id: int, folder_url: str, limit: int = None, 
 
         # 3. Short-lived session to read existing IDs and set total_videos
         with SessionLocal() as db:
-            if title_suffix:
-                # Re-migration run: process all videos regardless of existing records
-                to_migrate_raw = all_videos
-            else:
-                existing_ids = {v[0] for v in db.query(Video.vimeo_id).all()}
-                to_migrate_raw = [item for item in all_videos if item["video"]["uri"].split("/")[-1] not in existing_ids]
+            existing_ids = {v[0] for v in db.query(Video.vimeo_id).all()}
+            to_migrate_raw = [
+                item for item in all_videos
+                if (item["video"]["uri"].split("/")[-1] + (title_suffix or "")) not in existing_ids
+            ]
             to_migrate = to_migrate_raw[:limit] if limit else to_migrate_raw
             job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
             job.total_videos = len(to_migrate)
