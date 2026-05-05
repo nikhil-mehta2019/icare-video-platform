@@ -370,7 +370,7 @@ async def _run_bulk_audio_attachment(suffix: str, limit: int = None):
 
     with SessionLocal() as db:
         rows = db.execute(
-            text("SELECT vimeo_id, mux_asset_id, vimeo_url FROM videos WHERE vimeo_id LIKE :pattern AND mux_asset_id IS NOT NULL AND status='ready'"),
+            text("SELECT vimeo_id, mux_asset_id, vimeo_url FROM videos WHERE vimeo_id LIKE :pattern AND mux_asset_id IS NOT NULL AND status='ready' AND (audio_tracks_count IS NULL OR audio_tracks_count <= 1 OR audio_languages IS NULL)"),
             {"pattern": f"%{suffix}"}
         ).fetchall()
 
@@ -418,7 +418,7 @@ async def _run_bulk_audio_attachment(suffix: str, limit: int = None):
 
 
 @router.post("/attach-audio-bulk")
-async def attach_audio_bulk(suffix: str = "_052026", limit: Optional[int] = None):
+async def attach_audio_bulk(background_tasks: BackgroundTasks, suffix: str = "_052026", limit: Optional[int] = None):
     """
     Downloads audio from Vimeo and attaches to Mux for videos missing audio tracks.
     Use /sync-audio-bulk first to fix DB for assets that already have tracks on Mux.
@@ -426,13 +426,14 @@ async def attach_audio_bulk(suffix: str = "_052026", limit: Optional[int] = None
     """
     if _task_status.get("bulk_audio", {}).get("status") == "running":
         raise HTTPException(status_code=400, detail="Bulk audio task is already running.")
-    asyncio.create_task(_run_bulk_audio_attachment(suffix, limit))
+    _task_status["bulk_audio"] = {"status": "queued"}
+    background_tasks.add_task(_run_bulk_audio_attachment, suffix, limit)
     return {"status": "queued", "suffix": suffix, "limit": limit or "all",
             "message": "Bulk audio attachment started. Poll /migration/task-status for progress."}
 
 
 @router.post("/sync-audio-bulk")
-async def sync_audio_bulk(suffix: str = "_052026", limit: Optional[int] = None):
+async def sync_audio_bulk(background_tasks: BackgroundTasks, suffix: str = "_052026", limit: Optional[int] = None):
     """
     Reads each asset's tracks from Mux and syncs audio_tracks_count + audio_languages to DB.
     Fast — no downloads. Run this first before attach-audio-bulk.
@@ -440,7 +441,8 @@ async def sync_audio_bulk(suffix: str = "_052026", limit: Optional[int] = None):
     """
     if _task_status.get("bulk_audio", {}).get("status") == "running":
         raise HTTPException(status_code=400, detail="Bulk audio task is already running.")
-    asyncio.create_task(_run_bulk_audio_sync(suffix, limit))
+    _task_status["bulk_audio"] = {"status": "queued"}
+    background_tasks.add_task(_run_bulk_audio_sync, suffix, limit)
     return {"status": "queued", "suffix": suffix, "limit": limit or "all",
             "message": "Mux→DB audio sync started. Poll /migration/task-status for progress."}
 
