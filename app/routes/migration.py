@@ -275,16 +275,11 @@ async def attach_audio(vimeo_id: str, background_tasks: BackgroundTasks, db: Ses
     return {"status": "queued", "vimeo_id": vimeo_id, "mux_asset_id": video.mux_asset_id, "language": language or "all"}
 
 
-async def _run_bulk_audio_attachment(suffix: str, limit: int = None):
-    """Background task — attaches audio tracks to all videos whose vimeo_id ends with suffix."""
-    import logging
-    import os
-    from sqlalchemy import text
-
+def _setup_bulk_log():
+    import logging, os
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     LOGS_DIR = os.path.join(BASE_DIR, "logs")
     os.makedirs(LOGS_DIR, exist_ok=True)
-
     log = logging.getLogger("bulk_audio")
     if not log.handlers:
         formatter = logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -293,13 +288,25 @@ async def _run_bulk_audio_attachment(suffix: str, limit: int = None):
         fh.setLevel(logging.INFO)
         log.addHandler(fh)
         log.setLevel(logging.INFO)
+    return log
 
+
+async def _run_bulk_audio_sync(suffix: str, limit: int = None):
+    """
+    Reads each _052026 asset's tracks from Mux and syncs audio_tracks_count +
+    audio_languages to the DB. Does NOT re-upload anything — fast and safe.
+    Run this first to fix DB columns for assets whose tracks are already on Mux.
+    """
+    from sqlalchemy import text
+    from app.services.mux_service import get_asset
+
+    log = _setup_bulk_log()
     log.info(f"{'='*60}")
-    log.info(f"[Bulk Audio] Starting — suffix='{suffix}' | limit={limit or 'all'}")
+    log.info(f"[Bulk Audio Sync] Starting Mux→DB sync | suffix='{suffix}' | limit={limit or 'all'}")
 
     with SessionLocal() as db:
         rows = db.execute(
-            text("SELECT vimeo_id, mux_asset_id, vimeo_url FROM videos WHERE vimeo_id LIKE :pattern AND mux_asset_id IS NOT NULL"),
+            text("SELECT vimeo_id, mux_asset_id FROM videos WHERE vimeo_id LIKE :pattern AND mux_asset_id IS NOT NULL AND status='ready'"),
             {"pattern": f"%{suffix}"}
         ).fetchall()
 
@@ -307,77 +314,135 @@ async def _run_bulk_audio_attachment(suffix: str, limit: int = None):
         rows = rows[:limit]
 
     total = len(rows)
-    log.info(f"[Bulk Audio] Videos to process: {total}")
-    _task_status["bulk_audio"] = {
-        "status": "running", "total": total,
-        "attached": 0, "skipped": 0, "failed": 0, "current": 0, "current_vimeo_id": ""
-    }
+    log.info(f"[Bulk Audio Sync] Videos to sync: {total}")
+    _task_status["bulk_audio"] = {"status": "running", "total": total, "updated": 0, "failed": 0, "current": 0, "current_vimeo_id": ""}
 
-    attached, skipped, failed = 0, 0, 0
+    updated, failed = 0, 0
+
+    for i, (vimeo_id, mux_asset_id) in enumerate(rows, start=1):
+        _task_status["bulk_audio"].update({"current": i, "current_vimeo_id": vimeo_id})
+        log.info(f"[Bulk Audio Sync] {i}/{total} | {vimeo_id} | asset: {mux_asset_id}")
+        try:
+            asset = await asyncio.to_thread(get_asset, mux_asset_id)
+            tracks = asset.get("tracks", [])
+
+            # Alternate audio = named audio tracks excluding the default/undetermined one
+            alt_audio_langs = [
+                t["language_code"] for t in tracks
+                if t.get("type") == "audio"
+                and t.get("language_code") not in (None, "und", "")
+                and t.get("name", "").lower() != "default"
+            ]
+
+            log.info(f"[Bulk Audio Sync]   Mux tracks: {[(t.get('type'), t.get('language_code'), t.get('name')) for t in tracks]}")
+            log.info(f"[Bulk Audio Sync]   Alternate audio langs: {alt_audio_langs}")
+
+            with SessionLocal() as db:
+                db.execute(
+                    text("UPDATE videos SET audio_tracks_count=:c, audio_languages=:l WHERE vimeo_id=:v"),
+                    {"c": len(alt_audio_langs), "l": ", ".join(alt_audio_langs) if alt_audio_langs else None, "v": vimeo_id}
+                )
+                db.commit()
+
+            log.info(f"[Bulk Audio Sync]   ✅ DB updated: count={len(alt_audio_langs)}, langs={alt_audio_langs}")
+            updated += 1
+
+        except Exception as e:
+            failed += 1
+            log.error(f"[Bulk Audio Sync]   ❌ {vimeo_id}: {e}")
+
+        _task_status["bulk_audio"].update({"updated": updated, "failed": failed})
+
+    _task_status["bulk_audio"]["status"] = "done"
+    log.info(f"[Bulk Audio Sync] DONE — Total: {total} | Updated: {updated} | Failed: {failed}")
+
+
+async def _run_bulk_audio_attachment(suffix: str, limit: int = None):
+    """
+    For videos that genuinely have no audio tracks on Mux yet:
+    downloads from Vimeo via yt-dlp and attaches to Mux, then updates DB.
+    """
+    from sqlalchemy import text
+
+    log = _setup_bulk_log()
+    log.info(f"{'='*60}")
+    log.info(f"[Bulk Audio Attach] Starting | suffix='{suffix}' | limit={limit or 'all'}")
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            text("SELECT vimeo_id, mux_asset_id, vimeo_url FROM videos WHERE vimeo_id LIKE :pattern AND mux_asset_id IS NOT NULL AND status='ready'"),
+            {"pattern": f"%{suffix}"}
+        ).fetchall()
+
+    if limit:
+        rows = rows[:limit]
+
+    total = len(rows)
+    log.info(f"[Bulk Audio Attach] Videos to process: {total}")
+    _task_status["bulk_audio"] = {"status": "running", "total": total, "attached": 0, "skipped": 0, "failed": 0, "current": 0, "current_vimeo_id": ""}
+
+    attached_count, skipped, failed = 0, 0, 0
 
     for i, (vimeo_id, mux_asset_id, vimeo_url) in enumerate(rows, start=1):
         raw_vimeo_id = vimeo_id.split("_")[0] if "_" in vimeo_id else vimeo_id
         _task_status["bulk_audio"].update({"current": i, "current_vimeo_id": vimeo_id})
-
-        log.info(f"[Bulk Audio] --- {i}/{total} | DB vimeo_id: {vimeo_id} | raw: {raw_vimeo_id} | asset: {mux_asset_id}")
-        log.info(f"[Bulk Audio]   Vimeo URL: {vimeo_url}")
+        log.info(f"[Bulk Audio Attach] --- {i}/{total} | {vimeo_id} (raw: {raw_vimeo_id}) | asset: {mux_asset_id}")
+        log.info(f"[Bulk Audio Attach]   URL: {vimeo_url}")
 
         try:
             attached_langs = await attach_audio_tracks_background(mux_asset_id, raw_vimeo_id, vimeo_url)
 
-            # Update audio_tracks_count and audio_languages in DB with what actually got attached
             with SessionLocal() as db:
                 db.execute(
-                    text("""
-                        UPDATE videos
-                        SET audio_tracks_count = :count,
-                            audio_languages = :langs
-                        WHERE vimeo_id = :vid
-                    """),
-                    {
-                        "count": len(attached_langs),
-                        "langs": ", ".join(attached_langs) if attached_langs else None,
-                        "vid": vimeo_id,
-                    }
+                    text("UPDATE videos SET audio_tracks_count=:c, audio_languages=:l WHERE vimeo_id=:v"),
+                    {"c": len(attached_langs), "l": ", ".join(attached_langs) if attached_langs else None, "v": vimeo_id}
                 )
                 db.commit()
 
             if attached_langs:
-                log.info(f"[Bulk Audio]   ✅ Attached {len(attached_langs)} track(s): {attached_langs} → DB updated")
+                log.info(f"[Bulk Audio Attach]   ✅ Attached: {attached_langs} | DB updated")
+                attached_count += 1
             else:
-                log.info(f"[Bulk Audio]   ℹ️ No audio tracks found/attached for {vimeo_id} — DB set to 0")
-            attached += 1
+                log.info(f"[Bulk Audio Attach]   ℹ️ No tracks found/attached — DB set to 0")
+                skipped += 1
 
         except Exception as e:
             failed += 1
-            log.error(f"[Bulk Audio]   ❌ Exception for {vimeo_id}: {e}")
+            log.error(f"[Bulk Audio Attach]   ❌ {vimeo_id}: {e}")
 
-        _task_status["bulk_audio"].update({"attached": attached, "skipped": skipped, "failed": failed})
-        log.info(f"[Bulk Audio] Progress: {attached} attached | {failed} failed | {total - i} remaining")
+        _task_status["bulk_audio"].update({"attached": attached_count, "skipped": skipped, "failed": failed})
+        log.info(f"[Bulk Audio Attach]   Progress: {attached_count} attached | {skipped} skipped | {failed} failed | {total - i} remaining")
 
     _task_status["bulk_audio"]["status"] = "done"
-    log.info(f"[Bulk Audio] {'='*60}")
-    log.info(f"[Bulk Audio] FINISHED — Total: {total} | Attached: {attached} | Failed: {failed}")
+    log.info(f"[Bulk Audio Attach] DONE — Total: {total} | Attached: {attached_count} | Skipped: {skipped} | Failed: {failed}")
 
 
 @router.post("/attach-audio-bulk")
 async def attach_audio_bulk(suffix: str = "_052026", limit: Optional[int] = None):
     """
-    Triggers audio attachment for videos whose vimeo_id ends with the given suffix.
-    Pass ?limit=10 to test on a small batch first.
-    Runs sequentially in the background. Poll /migration/task-status for progress.
-    Detailed logs written to logs/bulk_audio_attachment.log on the server.
+    Downloads audio from Vimeo and attaches to Mux for videos missing audio tracks.
+    Use /sync-audio-bulk first to fix DB for assets that already have tracks on Mux.
+    Pass ?limit=10 to test. Poll /migration/task-status for progress.
     """
     if _task_status.get("bulk_audio", {}).get("status") == "running":
-        raise HTTPException(status_code=400, detail="Bulk audio attachment is already running.")
-
+        raise HTTPException(status_code=400, detail="Bulk audio task is already running.")
     asyncio.create_task(_run_bulk_audio_attachment(suffix, limit))
-    return {
-        "status": "queued",
-        "suffix": suffix,
-        "limit": limit or "all",
-        "message": "Bulk audio attachment started. Poll /migration/task-status or check logs/bulk_audio_attachment.log on server.",
-    }
+    return {"status": "queued", "suffix": suffix, "limit": limit or "all",
+            "message": "Bulk audio attachment started. Poll /migration/task-status for progress."}
+
+
+@router.post("/sync-audio-bulk")
+async def sync_audio_bulk(suffix: str = "_052026", limit: Optional[int] = None):
+    """
+    Reads each asset's tracks from Mux and syncs audio_tracks_count + audio_languages to DB.
+    Fast — no downloads. Run this first before attach-audio-bulk.
+    Pass ?limit=10 to test. Poll /migration/task-status for progress.
+    """
+    if _task_status.get("bulk_audio", {}).get("status") == "running":
+        raise HTTPException(status_code=400, detail="Bulk audio task is already running.")
+    asyncio.create_task(_run_bulk_audio_sync(suffix, limit))
+    return {"status": "queued", "suffix": suffix, "limit": limit or "all",
+            "message": "Mux→DB audio sync started. Poll /migration/task-status for progress."}
 
 
 @router.post("/folder-migration")
