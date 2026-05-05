@@ -84,11 +84,14 @@ async def mux_webhook(request: Request, background_tasks: BackgroundTasks, db: S
         video.audio_languages = ", ".join(aud_langs) if aud_langs else None
         logger.info(f"[Webhook] Tracks — captions: {cap_langs or 'none'} | audio: {aud_langs or 'none'}")
 
+        # Strip suffix (e.g. _052026) — vimeo_id in DB may be suffixed, but yt-dlp only needs the raw ID for temp filenames
+        raw_vimeo_id = video.vimeo_id.split("_")[0] if "_" in video.vimeo_id else video.vimeo_id
+
         # Trigger background audio download + attachment via yt-dlp
         background_tasks.add_task(
             attach_audio_tracks_background,
             video.mux_asset_id,
-            video.vimeo_id,
+            raw_vimeo_id,
             video.vimeo_url        # Full URL with privacy hash — needed for yt-dlp auth
         )
         logger.info(f"[Webhook] Background audio attachment queued for {video.vimeo_id}.")
