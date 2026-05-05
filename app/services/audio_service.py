@@ -93,16 +93,18 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
     return None
 
 
-async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo_url: str, only_language: str | None = None):
+async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo_url: str, only_language: str | None = None) -> list[str]:
     """
     Background task triggered by video.asset.ready webhook.
+
+    Returns a list of language codes that were successfully attached to Mux.
 
     Flow:
       1. Call Vimeo URL via yt-dlp to discover available audio languages
       2. Download each language audio track via yt-dlp
       3. Serve it locally via FastAPI /temp-audio
       4. Attach to the existing Mux asset
-      5. Delete temp file after 10 min (Mux fetches within a few minutes)
+      5. Delete temp file after 60s (Mux fetches within a few minutes)
     """
     logger.info(f"[Audio Service] Starting audio attachment for Vimeo {vimeo_id} → Mux {mux_asset_id}")
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -111,14 +113,16 @@ async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo
     audio_tracks = await asyncio.to_thread(_discover_audio_languages, vimeo_url)
     if not audio_tracks:
         logger.info(f"[Audio Service] No alternate audio tracks found for {vimeo_id}. Nothing to attach.")
-        return
+        return []
 
     # Step 2-5: Download, serve, attach, cleanup — one track at a time
     if only_language:
         audio_tracks = [t for t in audio_tracks if t["language"] == only_language]
         if not audio_tracks:
             logger.warning(f"[Audio Service] Language '{only_language}' not found in Vimeo tracks. Nothing to attach.")
-            return
+            return []
+
+    attached_languages = []
 
     for track in audio_tracks:
         language = track["language"]
@@ -137,6 +141,7 @@ async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo
 
             await asyncio.to_thread(add_audio_track, mux_asset_id, public_url, language, name)
             logger.info(f"[Audio Service] ✅ '{name}' ({language}) attached to Mux asset.")
+            attached_languages.append(language)
 
             logger.info(f"[Audio Service] Waiting {CLEANUP_DELAY_SECONDS}s before deleting temp file...")
             await asyncio.sleep(CLEANUP_DELAY_SECONDS)
@@ -147,3 +152,5 @@ async def attach_audio_tracks_background(mux_asset_id: str, vimeo_id: str, vimeo
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
                 logger.info(f"[Audio Service] Deleted temp file: {file_path}")
+
+    return attached_languages

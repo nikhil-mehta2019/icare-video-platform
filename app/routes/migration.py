@@ -323,21 +323,30 @@ async def _run_bulk_audio_attachment(suffix: str, limit: int = None):
         log.info(f"[Bulk Audio]   Vimeo URL: {vimeo_url}")
 
         try:
-            # Capture audio track count before and after by wrapping the call
-            # attach_audio_tracks_background logs its own per-track details
-            await attach_audio_tracks_background(mux_asset_id, raw_vimeo_id, vimeo_url)
+            attached_langs = await attach_audio_tracks_background(mux_asset_id, raw_vimeo_id, vimeo_url)
 
-            # Update DB audio_tracks_count based on what actually got attached
-            # (The webhook already does this on asset.ready, but we refresh here for bulk runs)
+            # Update audio_tracks_count and audio_languages in DB with what actually got attached
             with SessionLocal() as db:
                 db.execute(
-                    text("UPDATE videos SET audio_tracks_count = audio_tracks_count WHERE vimeo_id = :vid"),
-                    {"vid": vimeo_id}
+                    text("""
+                        UPDATE videos
+                        SET audio_tracks_count = :count,
+                            audio_languages = :langs
+                        WHERE vimeo_id = :vid
+                    """),
+                    {
+                        "count": len(attached_langs),
+                        "langs": ", ".join(attached_langs) if attached_langs else None,
+                        "vid": vimeo_id,
+                    }
                 )
                 db.commit()
 
+            if attached_langs:
+                log.info(f"[Bulk Audio]   ✅ Attached {len(attached_langs)} track(s): {attached_langs} → DB updated")
+            else:
+                log.info(f"[Bulk Audio]   ℹ️ No audio tracks found/attached for {vimeo_id} — DB set to 0")
             attached += 1
-            log.info(f"[Bulk Audio]   ✅ Done for {vimeo_id}")
 
         except Exception as e:
             failed += 1
