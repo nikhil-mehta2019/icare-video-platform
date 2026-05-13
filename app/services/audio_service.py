@@ -79,7 +79,6 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
     cmd = YT_DLP_BASE + [
         # Prefer m4a audio, fallback to any audio — no ffmpeg post-processing needed
         "-f", f"bestaudio[ext=m4a][language={language}]/bestaudio[ext=m4a]/bestaudio[language={language}]/bestaudio",
-        "--no-post-overwrites",
         "-o", output_template,
         player_url,
     ]
@@ -99,7 +98,7 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
         logger.error(f"[Audio Service] yt-dlp timed out for {vimeo_id} ({language})")
         return None
 
-    for ext in ["m4a", "mp3", "aac", "opus", "webm", "ogg"]:
+    for ext in ["mp4", "m4a", "mp3", "aac", "opus", "webm", "ogg"]:
         path = os.path.join(TEMP_AUDIO_DIR, f"{vimeo_id}_{language}.{ext}")
         if os.path.exists(path):
             logger.info(f"[Audio Service] ✅ Downloaded: {path}")
