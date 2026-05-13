@@ -237,10 +237,15 @@ async def remigrate_single_video(vimeo_id: str, db: Session = Depends(get_db)):
     db.delete(video)
     db.commit()
 
+    # Strip DB suffix (e.g. _052026) — pass as title_suffix so DB record keeps the full vimeo_id
+    parts = vimeo_id.split("_", 1)
+    raw_vimeo_id = parts[0]
+    title_suffix = f"_{parts[1]}" if len(parts) > 1 else None
+
     # Re-process: fetches from Vimeo and uploads to Mux with audio tracks enabled
     try:
         result = await asyncio.to_thread(
-            process_single_video, db, title, vimeo_url, vimeo_id, folder_path
+            process_single_video, db, title, vimeo_url, raw_vimeo_id, folder_path, None, title_suffix
         )
         return {"status": "success", "vimeo_id": vimeo_id, "mux_result": result}
     except Exception as e:
