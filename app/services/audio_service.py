@@ -22,14 +22,24 @@ YT_DLP_BASE = [
 ]
 
 
+def _to_player_url(vimeo_url: str) -> str:
+    """Convert vimeo.com/ID to player.vimeo.com/video/ID — avoids macOS API 404."""
+    import re
+    m = re.search(r'vimeo\.com/(\d+)', vimeo_url)
+    if m:
+        return f"https://player.vimeo.com/video/{m.group(1)}"
+    return vimeo_url
+
+
 def _discover_audio_languages(vimeo_url: str) -> list[dict]:
     """
     Calls yt-dlp --dump-json on the Vimeo URL to discover available audio tracks.
     Returns a list of dicts: [{language, name}, ...]
     No HLS parsing — yt-dlp handles Vimeo format discovery natively.
     """
-    cmd = YT_DLP_BASE + ["--dump-json", vimeo_url]
-    logger.info(f"[Audio Service] Discovering audio languages via yt-dlp for {vimeo_url}...")
+    player_url = _to_player_url(vimeo_url)
+    cmd = YT_DLP_BASE + ["--dump-json", player_url]
+    logger.info(f"[Audio Service] Discovering audio languages via yt-dlp for {player_url}...")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -65,12 +75,13 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
     os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
     output_template = os.path.join(TEMP_AUDIO_DIR, f"{vimeo_id}_{language}.%(ext)s")
 
+    player_url = _to_player_url(vimeo_url)
     cmd = YT_DLP_BASE + [
         # Prefer m4a audio, fallback to any audio — no ffmpeg post-processing needed
         "-f", f"bestaudio[ext=m4a][language={language}]/bestaudio[ext=m4a]/bestaudio[language={language}]/bestaudio",
         "--no-post-overwrites",
         "-o", output_template,
-        vimeo_url,
+        player_url,
     ]
 
     logger.info(f"[Audio Service] Downloading '{language}' audio from Vimeo...")
