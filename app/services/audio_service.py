@@ -90,6 +90,11 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
         if result.returncode != 0:
             logger.warning(f"[Audio Service] yt-dlp download failed ({language}):\n{result.stderr[-500:]}")
             return None
+        # Log stdout/stderr even on success so we can diagnose "no file" cases
+        if result.stdout:
+            logger.info(f"[Audio Service] yt-dlp stdout ({language}):\n{result.stdout[-500:]}")
+        if result.stderr:
+            logger.info(f"[Audio Service] yt-dlp stderr ({language}):\n{result.stderr[-500:]}")
     except subprocess.TimeoutExpired:
         logger.error(f"[Audio Service] yt-dlp timed out for {vimeo_id} ({language})")
         return None
@@ -100,6 +105,13 @@ def _download_audio(vimeo_url: str, vimeo_id: str, language: str) -> str | None:
             logger.info(f"[Audio Service] ✅ Downloaded: {path}")
             return path
 
+    # Log what files exist in temp_audio to help debug unexpected extensions
+    try:
+        files = os.listdir(TEMP_AUDIO_DIR)
+        relevant = [f for f in files if vimeo_id in f]
+        logger.warning(f"[Audio Service] Files in temp_audio matching {vimeo_id}: {relevant}")
+    except Exception:
+        pass
     logger.warning(f"[Audio Service] Output file not found after yt-dlp for {vimeo_id} ({language})")
     return None
 
