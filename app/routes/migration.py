@@ -799,6 +799,140 @@ def get_task_status():
         "drm_upgrade": _task_status.get("drm_upgrade", {"status": "not_started"}),
         "repair": _task_status.get("repair", {"status": "not_started"}),
         "bulk_audio": _task_status.get("bulk_audio", {"status": "not_started"}),
+        "add_signed": _task_status.get("add_signed", {"status": "not_started"}),
+    }
+
+
+async def _run_add_signed_playback_bulk():
+    """
+    For every video whose mux_signed_playback_id equals mux_drm_playback_id (i.e. no real signed ID yet):
+    1. Adds a true `signed` playback ID to the Mux asset
+    2. Stores it in mux_signed_playback_id in DB
+    3. Discovers Vimeo audio tracks — if alternate tracks exist and aren't on Mux yet, queues attachment
+    """
+    import logging
+    from app.database.models import Video
+    from app.services.mux_service import get_asset, add_signed_playback_id as _add_signed
+    from app.services.audio_service import _discover_audio_languages
+
+    log = logging.getLogger("add_signed")
+    log.info("[AddSigned] Background task started.")
+
+    with SessionLocal() as db:
+        # Target videos where signed == drm (no separate signed ID yet) or signed is null
+        videos = db.query(Video).filter(
+            Video.mux_asset_id != None,
+            Video.status == "ready",
+        ).all()
+        snapshot = [
+            (v.vimeo_id, v.mux_asset_id, v.mux_signed_playback_id, v.mux_drm_playback_id, v.vimeo_url, v.audio_languages)
+            for v in videos
+            if v.mux_signed_playback_id == v.mux_drm_playback_id  # no real signed ID yet
+        ]
+
+    total = len(snapshot)
+    log.info(f"[AddSigned] Videos to process: {total}")
+    _task_status["add_signed"] = {"status": "running", "total": total, "signed_added": 0, "audio_queued": 0, "skipped": 0, "failed": 0, "current": 0, "current_vimeo_id": ""}
+
+    signed_added, audio_queued, skipped, failed = 0, 0, 0, 0
+
+    for i, (vimeo_id, asset_id, signed_id, drm_id, vimeo_url, audio_languages) in enumerate(snapshot, start=1):
+        _task_status["add_signed"].update({"current": i, "current_vimeo_id": vimeo_id})
+        log.info(f"[AddSigned] {i}/{total} | {vimeo_id} | asset: {asset_id}")
+
+        try:
+            # Step 1: Check if a real signed ID already exists on Mux
+            asset = await asyncio.to_thread(get_asset, asset_id)
+            existing = {p["id"]: p.get("policy") for p in asset.get("playback_ids", [])}
+
+            real_signed = next((pid for pid, pol in existing.items() if pol == "signed"), None)
+
+            if real_signed:
+                # Already has a signed ID on Mux — just update DB if needed
+                if signed_id != real_signed:
+                    with SessionLocal() as db:
+                        v = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+                        if v:
+                            v.mux_signed_playback_id = real_signed
+                            db.commit()
+                    log.info(f"[AddSigned] ✅ Existing signed ID synced to DB: {real_signed}")
+                else:
+                    log.info(f"[AddSigned] ⏭ Already has signed ID: {real_signed}, skipping")
+                skipped += 1
+            else:
+                # Add a new signed playback ID
+                new_id, policy_type = await asyncio.to_thread(_add_signed, asset_id)
+                # _add_signed may return drm if DRM is configured — we want signed only
+                # If DRM came back, add a plain signed one explicitly
+                if policy_type == "drm":
+                    from app.services.mux_service import BASE_URL, MUX_TOKEN_ID, MUX_TOKEN_SECRET
+                    import requests
+                    resp = requests.post(
+                        f"{BASE_URL}/assets/{asset_id}/playback-ids",
+                        json={"policy": "signed"},
+                        auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET)
+                    )
+                    if resp.ok:
+                        new_id = resp.json()["data"]["id"]
+                        policy_type = "signed"
+
+                with SessionLocal() as db:
+                    v = db.query(Video).filter(Video.vimeo_id == vimeo_id).first()
+                    if v:
+                        v.mux_signed_playback_id = new_id
+                        db.commit()
+                signed_added += 1
+                log.info(f"[AddSigned] ✅ Signed ID added: {new_id} ({policy_type})")
+
+            # Step 2: Check Vimeo for alternate audio tracks if not already attached
+            mux_audio_langs = [
+                t["language_code"] for t in asset.get("tracks", [])
+                if t.get("type") == "audio" and t.get("language_code") not in (None, "und", "")
+                and t.get("name", "").lower() != "default"
+            ]
+
+            if not mux_audio_langs and vimeo_url:
+                log.info(f"[AddSigned] Checking Vimeo for audio tracks: {vimeo_url}")
+                vimeo_tracks = await asyncio.to_thread(_discover_audio_languages, vimeo_url)
+                if vimeo_tracks:
+                    raw_vimeo_id = vimeo_id.split("_")[0] if "_" in vimeo_id else vimeo_id
+                    asyncio.create_task(
+                        attach_audio_tracks_background(asset_id, raw_vimeo_id, vimeo_url)
+                    )
+                    audio_queued += 1
+                    log.info(f"[AddSigned] 🎵 Audio attachment queued for {vimeo_id}: {[t['language'] for t in vimeo_tracks]}")
+                else:
+                    log.info(f"[AddSigned] No alternate audio found on Vimeo for {vimeo_id}")
+            else:
+                log.info(f"[AddSigned] Audio already on Mux: {mux_audio_langs}, skipping Vimeo check")
+
+        except Exception as e:
+            failed += 1
+            log.error(f"[AddSigned] ❌ {vimeo_id}: {e}")
+
+        _task_status["add_signed"].update({"signed_added": signed_added, "audio_queued": audio_queued, "skipped": skipped, "failed": failed})
+        await asyncio.sleep(0.3)  # respect Mux rate limits
+
+    _task_status["add_signed"]["status"] = "done"
+    log.info(f"[AddSigned] DONE — Total: {total} | Signed added: {signed_added} | Audio queued: {audio_queued} | Skipped: {skipped} | Failed: {failed}")
+
+
+@router.post("/add-signed-playback-bulk")
+async def add_signed_playback_bulk(background_tasks: BackgroundTasks):
+    """
+    For all videos where mux_signed_playback_id == mux_drm_playback_id (no real signed ID):
+    1. Adds a signed playback ID to each Mux asset and stores in DB
+    2. Checks Vimeo for alternate audio tracks and queues attachment if missing
+    Poll /migration/task-status for progress.
+    """
+    if _task_status.get("add_signed", {}).get("status") == "running":
+        raise HTTPException(status_code=400, detail="add-signed-playback-bulk is already running.")
+
+    _task_status["add_signed"] = {"status": "queued"}
+    background_tasks.add_task(_run_add_signed_playback_bulk)
+    return {
+        "status": "queued",
+        "message": "Bulk signed playback ID addition started. Poll /migration/task-status for progress.",
     }
 
 
