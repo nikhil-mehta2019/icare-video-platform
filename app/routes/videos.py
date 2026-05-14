@@ -158,11 +158,16 @@ def get_download_url_by_mux_id(
     }
 
     if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
+        download_token = generate_download_token(video.mux_drm_playback_id, expiration_hours=6)
         offline_token = generate_offline_license_token(video.mux_drm_playback_id, expiration_hours=48)
-        response["drm_offline_license_token"] = offline_token
-        response["drm_widevine_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}"
-        response["drm_fairplay_license_url"] = f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}"
-        response["drm_fairplay_cert_url"] = "https://license.mux.com/fairplay/cert"
+        response["offline"] = {
+            "playback_id": video.mux_drm_playback_id,
+            "download_token": download_token,
+            "drm_token": offline_token,
+            "widevine_license_url": f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}",
+            "fairplay_license_url": f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}",
+            "fairplay_cert_url": "https://license.mux.com/fairplay/cert",
+        }
 
     return response
 
@@ -194,10 +199,15 @@ def get_download_url(
     }
 
     if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
+        download_token = generate_download_token(video.mux_drm_playback_id, expiration_hours=6)
         offline_token = generate_offline_license_token(video.mux_drm_playback_id, expiration_hours=48)
-        response["drm_offline_license_token"] = offline_token
-        response["drm_widevine_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}"
-        response["drm_fairplay_license_url"] = f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}"
-        response["drm_fairplay_cert_url"] = "https://license.mux.com/fairplay/cert"
+        response["offline"] = {
+            "playback_id": video.mux_drm_playback_id,
+            "download_token": download_token,
+            "drm_token": offline_token,
+            "widevine_license_url": f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}",
+            "fairplay_license_url": f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}",
+            "fairplay_cert_url": "https://license.mux.com/fairplay/cert",
+        }
 
     return response
