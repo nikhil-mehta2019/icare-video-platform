@@ -12,3 +12,4 @@ yt-dlp
 PyJWT[crypto]
 bcrypt
 email-validator
+gdown

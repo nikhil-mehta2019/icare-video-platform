@@ -105,6 +105,27 @@ def get_asset(asset_id: str):
     logger.info(f"[Mux Service] ✅ Successfully retrieved asset details for {asset_id}")
     return response.json()["data"]
 
+def list_all_assets():
+    """Fetch all assets from Mux, handling pagination."""
+    assets = []
+    page = 1
+    per_page = 100
+    while True:
+        response = requests.get(
+            f"{BASE_URL}/assets",
+            auth=(MUX_TOKEN_ID, MUX_TOKEN_SECRET),
+            params={"limit": per_page, "page": page}
+        )
+        if not response.ok:
+            raise Exception(f"Mux API Error: {response.text}")
+        data = response.json().get("data", [])
+        assets.extend(data)
+        if len(data) < per_page:
+            break
+        page += 1
+    return assets
+
+
 def delete_asset(asset_id: str):
     logger.info(f"[Mux Service] Attempting to delete asset: {asset_id}")
     response = requests.delete(
