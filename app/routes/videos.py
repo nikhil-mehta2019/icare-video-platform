@@ -155,7 +155,6 @@ def get_download_url_by_mux_id(
     if not video:
         token = generate_download_token(mux_playback_id, expiration_hours=1)
         download_url = f"https://stream.mux.com/{mux_playback_id}/high.mp4?token={token}"
-        manifest_url = f"https://stream.mux.com/{mux_playback_id}.m3u8"
         response = {
             "status": "success",
             "vimeo_id": None,
@@ -166,21 +165,33 @@ def get_download_url_by_mux_id(
             "drm_enabled": bool(DRM_CONFIGURATION_ID),
         }
         if DRM_CONFIGURATION_ID:
+            playback_token = generate_playback_token(mux_playback_id, expiration_hours=6)
+            manifest_url = f"https://stream.mux.com/{mux_playback_id}.m3u8?token={playback_token}"
             offline_token = generate_offline_license_token(mux_playback_id, expiration_hours=48)
+            widevine_url = f"https://license.mux.com/license/widevine/{mux_playback_id}?token={offline_token}"
             response["offline"] = {
                 "playback_id": mux_playback_id,
                 "download_token": token,
                 "drm_token": offline_token,
-                "widevine_license_url": f"https://license.mux.com/license/widevine/{mux_playback_id}?token={offline_token}",
+                "playback_token": playback_token,
+                "manifest_url": manifest_url,
+                "widevine_license_url": widevine_url,
                 "fairplay_license_url": f"https://license.mux.com/license/fairplay/{mux_playback_id}?token={offline_token}",
                 "fairplay_cert_url": "https://license.mux.com/fairplay/cert",
             }
+            logger.info(
+                "[DRM-DOWNLOAD]\n"
+                f"  playbackId={mux_playback_id}\n"
+                f"  playbackTokenGenerated={bool(playback_token)}\n"
+                f"  manifestUrl={manifest_url}\n"
+                f"  widevineLicenseUrl={widevine_url}"
+            )
         logger.info(
             "[DRM-DOWNLOAD-ENDPOINT] pre-return (no DB record)\n"
             f"  offline.playback_id={mux_playback_id}\n"
             f"  drm_enabled={response['drm_enabled']}\n"
             f"  widevine_license_url={response.get('offline', {}).get('widevine_license_url')}\n"
-            f"  manifestUrl={manifest_url}"
+            f"  manifestUrl={response.get('offline', {}).get('manifest_url')}"
         )
         return response
 
@@ -190,7 +201,6 @@ def get_download_url_by_mux_id(
 
     token = generate_download_token(download_playback_id, expiration_hours=1)
     download_url = f"https://stream.mux.com/{download_playback_id}/high.mp4?token={token}"
-    manifest_url = f"https://stream.mux.com/{download_playback_id}.m3u8"
 
     response = {
         "status": "success",
@@ -202,23 +212,35 @@ def get_download_url_by_mux_id(
     }
 
     if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
+        playback_token = generate_playback_token(video.mux_drm_playback_id, expiration_hours=6)
+        manifest_url = f"https://stream.mux.com/{video.mux_drm_playback_id}.m3u8?token={playback_token}"
         download_token = generate_download_token(video.mux_drm_playback_id, expiration_hours=6)
         offline_token = generate_offline_license_token(video.mux_drm_playback_id, expiration_hours=48)
+        widevine_url = f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}"
         response["offline"] = {
             "playback_id": video.mux_drm_playback_id,
             "download_token": download_token,
             "drm_token": offline_token,
-            "widevine_license_url": f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}",
+            "playback_token": playback_token,
+            "manifest_url": manifest_url,
+            "widevine_license_url": widevine_url,
             "fairplay_license_url": f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}",
             "fairplay_cert_url": "https://license.mux.com/fairplay/cert",
         }
+        logger.info(
+            "[DRM-DOWNLOAD]\n"
+            f"  playbackId={video.mux_drm_playback_id}\n"
+            f"  playbackTokenGenerated={bool(playback_token)}\n"
+            f"  manifestUrl={manifest_url}\n"
+            f"  widevineLicenseUrl={widevine_url}"
+        )
 
     logger.info(
         "[DRM-DOWNLOAD-ENDPOINT] pre-return\n"
         f"  offline.playback_id={response.get('offline', {}).get('playback_id')}\n"
         f"  drm_enabled={response['drm_enabled']}\n"
         f"  widevine_license_url={response.get('offline', {}).get('widevine_license_url')}\n"
-        f"  manifestUrl={manifest_url}"
+        f"  manifestUrl={response.get('offline', {}).get('manifest_url')}"
     )
 
     return response
@@ -325,16 +347,28 @@ def get_download_url(
     }
 
     if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
+        playback_token = generate_playback_token(video.mux_drm_playback_id, expiration_hours=6)
+        manifest_url = f"https://stream.mux.com/{video.mux_drm_playback_id}.m3u8?token={playback_token}"
         download_token = generate_download_token(video.mux_drm_playback_id, expiration_hours=6)
         offline_token = generate_offline_license_token(video.mux_drm_playback_id, expiration_hours=48)
+        widevine_url = f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}"
         response["offline"] = {
             "playback_id": video.mux_drm_playback_id,
             "download_token": download_token,
             "drm_token": offline_token,
-            "widevine_license_url": f"https://license.mux.com/license/widevine/{video.mux_drm_playback_id}?token={offline_token}",
+            "playback_token": playback_token,
+            "manifest_url": manifest_url,
+            "widevine_license_url": widevine_url,
             "fairplay_license_url": f"https://license.mux.com/license/fairplay/{video.mux_drm_playback_id}?token={offline_token}",
             "fairplay_cert_url": "https://license.mux.com/fairplay/cert",
         }
+        logger.info(
+            "[DRM-DOWNLOAD]\n"
+            f"  playbackId={video.mux_drm_playback_id}\n"
+            f"  playbackTokenGenerated={bool(playback_token)}\n"
+            f"  manifestUrl={manifest_url}\n"
+            f"  widevineLicenseUrl={widevine_url}"
+        )
 
     return response
 
