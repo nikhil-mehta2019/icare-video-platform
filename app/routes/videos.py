@@ -77,16 +77,16 @@ def get_secure_playback_data(
         "vimeo_id": video.vimeo_id,
         "title": video.vimeo_title or "Untitled Video",
         "playback_id": video.mux_signed_playback_id,
-        "secure_stream_url": secure_stream_url,
-        "playback_token": secure_token,
+        "secureStreamUrl": secure_stream_url,
+        "token": secure_token,
         "token_expires_in_hours": expiration_hours,
         "drm_enabled": bool(DRM_CONFIGURATION_ID),
     }
 
     if DRM_CONFIGURATION_ID:
         license_token = generate_drm_license_token(video.mux_signed_playback_id, expiration_hours=expiration_hours)
-        response["drm_license_token"] = license_token
-        response["drm_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_signed_playback_id}?token={license_token}"
+        response["drmToken"] = license_token
+        response["drmLicenseUrl"] = f"https://license.mux.com/license/widevine/{video.mux_signed_playback_id}?token={license_token}"
 
     return response
 
@@ -117,16 +117,16 @@ def get_secure_playback_data_by_mux_id(
         "vimeo_id": video.vimeo_id,
         "title": video.vimeo_title or "Untitled Video",
         "playback_id": video.mux_signed_playback_id,
-        "secure_stream_url": secure_stream_url,
-        "playback_token": secure_token,
+        "secureStreamUrl": secure_stream_url,
+        "token": secure_token,
         "token_expires_in_hours": expiration_hours,
         "drm_enabled": bool(DRM_CONFIGURATION_ID),
     }
 
     if DRM_CONFIGURATION_ID:
         license_token = generate_drm_license_token(video.mux_signed_playback_id, expiration_hours=expiration_hours)
-        response["drm_license_token"] = license_token
-        response["drm_license_url"] = f"https://license.mux.com/license/widevine/{video.mux_signed_playback_id}?token={license_token}"
+        response["drmToken"] = license_token
+        response["drmLicenseUrl"] = f"https://license.mux.com/license/widevine/{video.mux_signed_playback_id}?token={license_token}"
 
     return response
 

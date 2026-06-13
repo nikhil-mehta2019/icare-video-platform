@@ -251,23 +251,35 @@ async def run_folder_migration(job_id: int, folder_url: str, limit: int = None, 
             folder_name = item["folder_name"]
             vimeo_id = v["uri"].split("/")[-1]
             jlog.info(f"[Folder Migration] Processing {imported + failed + 1}/{len(to_migrate)} — Vimeo ID: {vimeo_id} ({v.get('name', 'Untitled')})")
+            await asyncio.sleep(0.5)  # gentle pacing between videos
 
-            with SessionLocal() as db:
+            # Retry the video-level DB work up to 3 times on transient errors
+            for _attempt in range(3):
                 try:
-                    await asyncio.to_thread(
-                        process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name, title_suffix
-                    )
-                    imported += 1
-                except Exception as e:
-                    jlog.error(f"[Folder Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
-                    failed += 1
-                    db.rollback()
-                    db.add(MigrationError(job_id=job_id, vimeo_id=vimeo_id, error_message=str(e)))
+                    with SessionLocal() as db:
+                        try:
+                            await asyncio.to_thread(
+                                process_single_video, db, v.get("name"), v.get("link"), vimeo_id, folder_name, folder_name, title_suffix
+                            )
+                            imported += 1
+                        except Exception as e:
+                            jlog.error(f"[Folder Migration] ❌ Failed for Vimeo ID {vimeo_id}: {str(e)}")
+                            failed += 1
+                            db.rollback()
+                            db.add(MigrationError(job_id=job_id, vimeo_id=vimeo_id, error_message=str(e)))
 
-                job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
-                job.imported_videos = imported
-                job.failed_videos = failed
-                db.commit()
+                        job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
+                        job.imported_videos = imported
+                        job.failed_videos = failed
+                        db.commit()
+                    break  # success — exit retry loop
+                except Exception as db_err:
+                    jlog.warning(f"[Folder Migration] DB error on attempt {_attempt + 1}/3 for {vimeo_id}: {db_err}")
+                    if _attempt == 2:
+                        jlog.error(f"[Folder Migration] Giving up on {vimeo_id} after 3 DB errors.")
+                        failed += 1
+                    else:
+                        await asyncio.sleep(2 ** _attempt)  # 1s, 2s backoff
 
         with SessionLocal() as db:
             job = db.query(MigrationJob).filter(MigrationJob.id == job_id).first()
