@@ -373,6 +373,37 @@ def get_download_url(
     return response
 
 
+@router.get("/assets/by-asset-id/{mux_asset_id}")
+def get_video_by_asset_id(mux_asset_id: str, db: Session = Depends(get_db), _: str = Depends(verify_api_key)):
+    from datetime import datetime
+    video = db.query(Video).filter(Video.mux_asset_id == mux_asset_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail=f"No video found with mux_asset_id '{mux_asset_id}'")
+    if not video.created_at or video.created_at <= datetime(2026, 6, 1):
+        raise HTTPException(status_code=404, detail="Video exists but was created on or before June 1, 2026.")
+    return {
+        "id": video.id,
+        "vimeo_id": video.vimeo_id,
+        "title": video.vimeo_title,
+        "vimeo_url": video.vimeo_url,
+        "vimeo_folder_path": video.vimeo_folder_path,
+        "mux_asset_id": video.mux_asset_id,
+        "mux_playback_id": video.mux_playback_id,
+        "mux_signed_playback_id": video.mux_signed_playback_id,
+        "mux_drm_playback_id": video.mux_drm_playback_id,
+        "mux_stream_url": video.mux_stream_url,
+        "status": video.status,
+        "drm_enabled": bool(video.mux_drm_playback_id),
+        "captions_count": video.captions_count,
+        "captions_languages": video.captions_languages,
+        "audio_tracks_count": video.audio_tracks_count,
+        "audio_languages": video.audio_languages,
+        "video_quality": video.video_quality,
+        "drm_compatible": video.drm_compatible,
+        "created_at": video.created_at.isoformat() if video.created_at else None,
+    }
+
+
 @router.get("/assets/export-excel")
 def export_mux_assets_excel(_: str = Depends(verify_api_key)):
     import io
