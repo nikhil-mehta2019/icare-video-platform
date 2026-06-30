@@ -1,7 +1,5 @@
 import os
 import logging
-from pathlib import Path
-from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -18,48 +16,54 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/attachment", tags=["Bulk Attachment"])
 
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".aac", ".wav", ".opus", ".webm", ".ogg"}
+SRT_EXTENSIONS   = {".srt", ".vtt"}
+
+
+def _build_file_map(folder: str, extensions: set[str]) -> dict[str, str]:
+    file_map = {}
+    if not os.path.isdir(folder):
+        raise ValueError(f"Folder not found on server: {folder}")
+    for fname in os.listdir(folder):
+        if os.path.splitext(fname)[1].lower() in extensions:
+            file_map[_normalize(fname)] = os.path.join(folder, fname)
+    return file_map
+
 
 @router.post("/attach", summary="Bulk-attach audio and/or SRT files to existing Mux assets via Excel mapping")
 async def bulk_attach(
     excel_file: UploadFile = File(..., description="Excel (.xlsx) with asset_id and video_name columns"),
-    audio_files: Optional[List[UploadFile]] = File(None, description="Audio files (.mp3 / .m4a / .aac)"),
-    srt_files: Optional[List[UploadFile]] = File(None, description="SRT subtitle files"),
+    audio_folder: str = Form(None, description="Absolute path to folder containing audio files on the server"),
+    srt_folder: str = Form(None, description="Absolute path to folder containing SRT files on the server"),
     asset_id_column: str = Form("mux_asset_id", description="Column name for Mux asset ID"),
     video_name_column: str = Form("video_name", description="Column name for video title used for filename matching"),
     audio_language: str = Form("hi", description="Language code for audio tracks (e.g. hi, es, sw)"),
     audio_name: str = Form("Hindi", description="Display name for the audio track in Mux"),
     srt_language: str = Form("hi", description="Language code for subtitle tracks"),
 ):
+    if not audio_folder and not srt_folder:
+        raise HTTPException(status_code=400, detail="Provide at least one of audio_folder or srt_folder.")
+
     os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
-    saved_paths: list[str] = []
+    excel_path = os.path.join(TEMP_AUDIO_DIR, excel_file.filename)
 
     try:
-        # Save Excel
-        excel_path = os.path.join(TEMP_AUDIO_DIR, excel_file.filename)
+        # Save uploaded Excel to temp dir
         content = await excel_file.read()
         with open(excel_path, "wb") as f:
             f.write(content)
-        saved_paths.append(excel_path)
 
-        # Save audio files and build normalized→path map
-        audio_map: dict[str, str] = {}
-        for uf in (audio_files or []):
-            dest = os.path.join(TEMP_AUDIO_DIR, uf.filename)
-            data = await uf.read()
-            with open(dest, "wb") as f:
-                f.write(data)
-            saved_paths.append(dest)
-            audio_map[_normalize(uf.filename)] = dest
+        # Build file maps from server folders
+        try:
+            audio_map = _build_file_map(audio_folder, AUDIO_EXTENSIONS) if audio_folder else {}
+            srt_map   = _build_file_map(srt_folder,   SRT_EXTENSIONS)   if srt_folder   else {}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
-        # Save SRT files and build normalized→path map
-        srt_map: dict[str, str] = {}
-        for uf in (srt_files or []):
-            dest = os.path.join(TEMP_AUDIO_DIR, uf.filename)
-            data = await uf.read()
-            with open(dest, "wb") as f:
-                f.write(data)
-            saved_paths.append(dest)
-            srt_map[_normalize(uf.filename)] = dest
+        if audio_folder and not audio_map:
+            raise HTTPException(status_code=400, detail=f"No audio files found in: {audio_folder}")
+        if srt_folder and not srt_map:
+            raise HTTPException(status_code=400, detail=f"No SRT files found in: {srt_folder}")
 
         # Read Excel rows
         try:
@@ -109,9 +113,9 @@ async def bulk_attach(
                 "status": status,
             })
 
-        success  = sum(1 for r in results if r["status"] == "success")
-        skipped  = sum(1 for r in results if r["status"] == "skipped")
-        errors   = sum(1 for r in results if r["status"] == "error")
+        success = sum(1 for r in results if r["status"] == "success")
+        skipped = sum(1 for r in results if r["status"] == "skipped")
+        errors  = sum(1 for r in results if r["status"] == "error")
 
         return {
             "processed": len(rows),
@@ -127,10 +131,8 @@ async def bulk_attach(
         logger.exception("[Attachment] Unexpected error during bulk attach")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up Excel and any unmatched uploaded files that weren't consumed by attach_tracks_to_asset
-        for path in saved_paths:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                pass
+        try:
+            if os.path.exists(excel_path):
+                os.remove(excel_path)
+        except Exception:
+            pass

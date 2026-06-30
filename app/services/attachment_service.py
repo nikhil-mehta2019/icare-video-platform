@@ -76,6 +76,7 @@ def attach_tracks_to_asset(
     audio_name: str,
     srt_language: str,
 ) -> dict:
+    import shutil
     result = {"audio": None, "srt": None, "errors": []}
     os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
     temp_files: list[str] = []
@@ -85,7 +86,6 @@ def attach_tracks_to_asset(
             filename = os.path.basename(audio_path)
             dest = os.path.join(TEMP_AUDIO_DIR, filename)
             if audio_path != dest:
-                import shutil
                 shutil.copy2(audio_path, dest)
             temp_files.append(dest)
             url = f"{SERVER_BASE_URL}/temp-audio/{filename}"
@@ -101,7 +101,6 @@ def attach_tracks_to_asset(
             filename = os.path.basename(srt_path)
             dest = os.path.join(TEMP_AUDIO_DIR, filename)
             if srt_path != dest:
-                import shutil
                 shutil.copy2(srt_path, dest)
             temp_files.append(dest)
             url = f"{SERVER_BASE_URL}/temp-audio/{filename}"
