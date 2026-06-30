@@ -1,10 +1,12 @@
 import os
 import io
+import uuid
 import logging
 import zipfile
+from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from app.services.attachment_service import (
@@ -14,10 +16,14 @@ from app.services.attachment_service import (
     read_excel_rows,
     TEMP_AUDIO_DIR,
 )
+from app.services.track_attachment_service import run_track_attachment
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/attachment", tags=["Bulk Attachment"])
+
+# In-memory progress store keyed by job_id
+_attach_jobs: dict[str, dict] = {}
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".aac", ".wav", ".opus", ".webm", ".ogg"}
 SRT_EXTENSIONS   = {".srt", ".vtt"}
@@ -173,3 +179,63 @@ async def bulk_attach(
                     os.remove(path)
             except Exception:
                 pass
+
+
+# ── Generic track attachment from local folders ───────────────────────────────
+
+class AttachTracksRequest(BaseModel := __import__("pydantic").BaseModel):
+    srt_dir: Optional[str] = None
+    audio_dir: Optional[str] = None
+    lang_code: str = "sw"
+    lang_name: str = "Swahili"
+    cutoff_date: Optional[str] = None          # ISO date string e.g. "2026-06-01"
+    manual_map: dict[str, int] = {}            # {lowercase_title: db_video_id}
+    dry_run: bool = False
+
+
+@router.post("/attach-tracks", summary="Attach SRT and/or audio tracks to Mux assets matched from local folders")
+async def attach_tracks(req: AttachTracksRequest, background_tasks: BackgroundTasks):
+    if not req.srt_dir and not req.audio_dir:
+        raise HTTPException(status_code=400, detail="Provide at least one of srt_dir or audio_dir.")
+
+    if req.srt_dir and not os.path.isdir(req.srt_dir):
+        raise HTTPException(status_code=400, detail=f"srt_dir not found: {req.srt_dir}")
+    if req.audio_dir and not os.path.isdir(req.audio_dir):
+        raise HTTPException(status_code=400, detail=f"audio_dir not found: {req.audio_dir}")
+
+    cutoff = None
+    if req.cutoff_date:
+        try:
+            cutoff = datetime.fromisoformat(req.cutoff_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid cutoff_date: {req.cutoff_date}. Use ISO format e.g. 2026-06-01")
+
+    job_id = str(uuid.uuid4())[:8]
+    progress = {}
+    _attach_jobs[job_id] = progress
+
+    background_tasks.add_task(
+        run_track_attachment,
+        job_id=job_id,
+        srt_dir=req.srt_dir,
+        audio_dir=req.audio_dir,
+        lang_code=req.lang_code,
+        lang_name=req.lang_name,
+        cutoff=cutoff,
+        manual_map=req.manual_map,
+        dry_run=req.dry_run,
+        progress=progress,
+    )
+
+    return {
+        "job_id": job_id,
+        "message": "Track attachment started in background. Poll /attachment/attach-tracks/status/{job_id} for progress.",
+        "dry_run": req.dry_run,
+    }
+
+
+@router.get("/attach-tracks/status/{job_id}", summary="Poll progress of a track attachment job")
+def attach_tracks_status(job_id: str):
+    if job_id not in _attach_jobs:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
+    return {"job_id": job_id, **_attach_jobs[job_id]}
