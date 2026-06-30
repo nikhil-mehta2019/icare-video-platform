@@ -1,5 +1,8 @@
 import os
+import io
 import logging
+import zipfile
+from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -20,50 +23,76 @@ AUDIO_EXTENSIONS = {".mp3", ".m4a", ".aac", ".wav", ".opus", ".webm", ".ogg"}
 SRT_EXTENSIONS   = {".srt", ".vtt"}
 
 
-def _build_file_map(folder: str, extensions: set[str]) -> dict[str, str]:
+def _extract_zip_to_map(zip_bytes: bytes, allowed_extensions: set[str]) -> dict[str, str]:
+    """Extract zip in-memory, write matching files to TEMP_AUDIO_DIR, return normalized→path map."""
     file_map = {}
-    if not os.path.isdir(folder):
-        raise ValueError(f"Folder not found on server: {folder}")
-    for fname in os.listdir(folder):
-        if os.path.splitext(fname)[1].lower() in extensions:
-            file_map[_normalize(fname)] = os.path.join(folder, fname)
+    os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for member in zf.infolist():
+            if member.is_dir():
+                continue
+            fname = os.path.basename(member.filename)
+            if not fname:
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in allowed_extensions:
+                continue
+            dest = os.path.join(TEMP_AUDIO_DIR, fname)
+            with zf.open(member) as src, open(dest, "wb") as out:
+                out.write(src.read())
+            file_map[_normalize(fname)] = dest
     return file_map
 
 
 @router.post("/attach", summary="Bulk-attach audio and/or SRT files to existing Mux assets via Excel mapping")
 async def bulk_attach(
     excel_file: UploadFile = File(..., description="Excel (.xlsx) with asset_id and video_name columns"),
-    audio_folder: str = Form(None, description="Absolute path to folder containing audio files on the server"),
-    srt_folder: str = Form(None, description="Absolute path to folder containing SRT files on the server"),
+    audio_zip: Optional[UploadFile] = File(None, description="Zip archive of audio files (.mp3 / .m4a / .aac)"),
+    srt_zip: Optional[UploadFile] = File(None, description="Zip archive of SRT/VTT subtitle files"),
     asset_id_column: str = Form("mux_asset_id", description="Column name for Mux asset ID"),
     video_name_column: str = Form("video_name", description="Column name for video title used for filename matching"),
     audio_language: str = Form("hi", description="Language code for audio tracks (e.g. hi, es, sw)"),
     audio_name: str = Form("Hindi", description="Display name for the audio track in Mux"),
     srt_language: str = Form("hi", description="Language code for subtitle tracks"),
 ):
-    if not audio_folder and not srt_folder:
-        raise HTTPException(status_code=400, detail="Provide at least one of audio_folder or srt_folder.")
+    if not audio_zip and not srt_zip:
+        raise HTTPException(status_code=400, detail="Provide at least one of audio_zip or srt_zip.")
 
     os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
     excel_path = os.path.join(TEMP_AUDIO_DIR, excel_file.filename)
+    extracted_files: list[str] = []
 
     try:
-        # Save uploaded Excel to temp dir
+        # Save Excel
         content = await excel_file.read()
         with open(excel_path, "wb") as f:
             f.write(content)
 
-        # Build file maps from server folders
-        try:
-            audio_map = _build_file_map(audio_folder, AUDIO_EXTENSIONS) if audio_folder else {}
-            srt_map   = _build_file_map(srt_folder,   SRT_EXTENSIONS)   if srt_folder   else {}
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        # Extract zips into TEMP_AUDIO_DIR and build file maps
+        audio_map: dict[str, str] = {}
+        srt_map:   dict[str, str] = {}
 
-        if audio_folder and not audio_map:
-            raise HTTPException(status_code=400, detail=f"No audio files found in: {audio_folder}")
-        if srt_folder and not srt_map:
-            raise HTTPException(status_code=400, detail=f"No SRT files found in: {srt_folder}")
+        if audio_zip:
+            audio_bytes = await audio_zip.read()
+            try:
+                audio_map = await run_in_threadpool(_extract_zip_to_map, audio_bytes, AUDIO_EXTENSIONS)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail="audio_zip is not a valid zip file.")
+            extracted_files.extend(audio_map.values())
+            if not audio_map:
+                raise HTTPException(status_code=400, detail="No audio files found inside audio_zip.")
+            logger.info(f"[Attachment] Extracted {len(audio_map)} audio file(s) from zip.")
+
+        if srt_zip:
+            srt_bytes = await srt_zip.read()
+            try:
+                srt_map = await run_in_threadpool(_extract_zip_to_map, srt_bytes, SRT_EXTENSIONS)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail="srt_zip is not a valid zip file.")
+            extracted_files.extend(srt_map.values())
+            if not srt_map:
+                raise HTTPException(status_code=400, detail="No SRT/VTT files found inside srt_zip.")
+            logger.info(f"[Attachment] Extracted {len(srt_map)} SRT file(s) from zip.")
 
         # Read Excel rows
         try:
@@ -131,8 +160,16 @@ async def bulk_attach(
         logger.exception("[Attachment] Unexpected error during bulk attach")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
+        # Clean up Excel
         try:
             if os.path.exists(excel_path):
                 os.remove(excel_path)
         except Exception:
             pass
+        # Clean up any extracted files not already deleted by attach_tracks_to_asset
+        for path in extracted_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
