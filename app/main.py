@@ -3,7 +3,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from app.routes import playback, videos, migration, webhook, batch, auth, attachment
+from app.routes import playback, videos, migration, webhook, batch, auth, attachment, upload
 from app.database.session import Base, engine
 
 # ── Directories ──────────────────────────────────────────────────────────────
@@ -58,6 +58,7 @@ app.include_router(migration.router)
 app.include_router(webhook.router)
 app.include_router(batch.router)
 app.include_router(attachment.router)
+app.include_router(upload.router)
 
 @app.get("/")
 def home():
