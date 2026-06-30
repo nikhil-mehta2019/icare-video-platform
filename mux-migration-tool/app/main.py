@@ -15,14 +15,14 @@ logging.basicConfig(
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMP_DIR = os.path.join(BASE_DIR, "temp")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(TEMP_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create DB tables on startup
     Base.metadata.create_all(bind=engine)
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    os.makedirs(LOGS_DIR, exist_ok=True)
     yield
 
 
