@@ -209,6 +209,8 @@ def get_download_url_by_mux_id(
         "download_url": download_url,
         "token_expires_in_hours": 1,
         "drm_enabled": bool(DRM_CONFIGURATION_ID and video.mux_drm_playback_id),
+        "audio_languages": [l.strip() for l in (video.audio_languages or "").split(",") if l.strip()],
+        "caption_languages": [l.strip() for l in (video.captions_languages or "").split(",") if l.strip()],
     }
 
     if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
@@ -344,6 +346,8 @@ def get_download_url(
         "download_url": download_url,
         "token_expires_in_hours": 1,
         "drm_enabled": bool(DRM_CONFIGURATION_ID and video.mux_drm_playback_id),
+        "audio_languages": [l.strip() for l in (video.audio_languages or "").split(",") if l.strip()],
+        "caption_languages": [l.strip() for l in (video.captions_languages or "").split(",") if l.strip()],
     }
 
     if DRM_CONFIGURATION_ID and video.mux_drm_playback_id:
@@ -402,6 +406,34 @@ def get_video_by_asset_id(mux_asset_id: str, db: Session = Depends(get_db), _: s
         "drm_compatible": video.drm_compatible,
         "created_at": video.created_at.isoformat() if video.created_at else None,
     }
+
+
+@router.get("/assets/search-export")
+def search_and_export_assets(q: str, db: Session = Depends(get_db), _: str = Depends(verify_api_key)):
+    import io
+    import pandas as pd
+
+    videos = db.query(Video).filter(Video.vimeo_title.ilike(f"%{q}%")).all()
+
+    rows = []
+    for v in videos:
+        rows.append({
+            "asset_id": v.mux_asset_id or "",
+            "video_name": v.vimeo_title or "",
+            "created_at": v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else "",
+        })
+
+    df = pd.DataFrame(rows)
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    buf.seek(0)
+
+    safe_q = q.replace(" ", "_")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=mux_assets_{safe_q}.xlsx"}
+    )
 
 
 @router.get("/assets/export-excel")
