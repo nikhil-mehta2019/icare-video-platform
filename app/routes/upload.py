@@ -32,7 +32,8 @@ async def upload_temp_file(filename: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
     size_mb = os.path.getsize(dest) / 1_000_000
-    url = f"{SERVER_BASE_URL}/temp-audio/{filename}"
+    from urllib.parse import quote
+    url = f"{SERVER_BASE_URL}/temp-audio/{quote(filename)}"
     logger.info(f"[Upload] Saved {filename} ({size_mb:.2f} MB) → {url}")
     return JSONResponse({"url": url, "filename": filename, "size_mb": round(size_mb, 2)})
 
