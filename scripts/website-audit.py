@@ -176,7 +176,7 @@ def main():
         findings["live_crawl"]={"pages_inspected":len(html_pages),"responses":statuses}
     report={"target":args.url or str(ROOT),"standard":"WLS v1.0","summary":{},"checks":[findings[k] for k,_ in CHECKS],"notes":["Static pattern matches are PARTIAL, never proof of live correctness.","Analytics event delivery, Search Console access, legal review, redirects, 404 behavior, and contact delivery need dedicated verification."]}
     counts=Counter(x["status"] for x in report["checks"]); report["summary"]={k:counts.get(k,0) for k in ["PASS","FAIL","PARTIAL","BLOCKED","N/A"]}
-    report["recommendation"]="NOT READY TO LAUNCH" if counts["FAIL"] else ("READY WITH ACCEPTED EXCEPTIONS" if counts["BLOCKED"] or counts["PARTIAL"] else "READY TO LAUNCH")
+    report["recommendation"]="NOT READY TO LAUNCH" if any(counts[x] for x in ("FAIL","BLOCKED","PARTIAL")) else "READY TO LAUNCH"
     print(f"Website Launch Audit — {report['target']}")
     print("Summary: "+" | ".join(f"{k}: {v}" for k,v in report["summary"].items()))
     for c in report["checks"]:
